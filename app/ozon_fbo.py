@@ -48,8 +48,8 @@ class OzonFboClient:
         payload: Dict[str, Any] = {
             "limit": limit,
             "offset": offset,
-            "sort_by": "CREATED_AT",
-            "order": "DESC",
+            "sort_by": "1",
+            "order": "2",
         }
         if status:
             payload["status"] = status
