@@ -1,6 +1,3 @@
-cd /root/ozon_ms_fbo_integration
-
-cat > app/ozon_fbo.py <<'PY'
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -13,7 +10,6 @@ from .http import request_json, HttpError
 class OzonFboClient:
     client_id: str
     api_key: str
-
     base_url: str = "https://api-seller.ozon.ru"
 
     @property
@@ -32,37 +28,48 @@ class OzonFboClient:
             json_body=payload,
         )
 
-    def _post_with_fallback(
-        self,
-        primary_path: str,
-        fallback_path: str,
-        payload: Dict[str, Any],
-    ) -> Dict[str, Any]:
+    def _post_with_fallback(self, primary: str, fallback: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         try:
-            return self.post(primary_path, payload)
+            return self.post(primary, payload)
         except HttpError as e:
-            # если вдруг на аккаунте не включён v3, пробуем v2
-            if " 404 " in str(e) or str(e).startswith("404 "):
-                return self.post(fallback_path, payload)
+            # если v3 недоступен — пробуем v2
+            if str(e).startswith("404 ") or " 404 " in str(e):
+                return self.post(fallback, payload)
             raise
 
-    def list_supplies(self, *, status: Optional[str] = None, limit: int = 100, offset: int = 0) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {
-        "limit": limit,
-        "offset": offset,
-        "sort_by": "CREATED_AT",
-        "order": "DESC",
-    }
-    if status:
-        payload["status"] = status
+    def list_supplies(
+        self,
+        *,
+        status: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        # ВАЖНО: sort_by/order должны быть всегда, иначе Ozon отдаёт 400
+        payload: Dict[str, Any] = {
+            "limit": limit,
+            "offset": offset,
+            "sort_by": "CREATED_AT",
+            "order": "DESC",
+        }
+        if status:
+            payload["status"] = status
 
-    return self._post_with_fallback("/v3/supply-order/list", "/v2/supply-order/list", payload)
+        return self._post_with_fallback(
+            "/v3/supply-order/list",
+            "/v2/supply-order/list",
+            payload,
+        )
 
     def get_supply(self, supply_order_id: int) -> Dict[str, Any]:
         payload = {"supply_order_id": supply_order_id}
-        return self._post_with_fallback("/v3/supply-order/get", "/v2/supply-order/get", payload)
+        return self._post_with_fallback(
+            "/v3/supply-order/get",
+            "/v2/supply-order/get",
+            payload,
+        )
 
     def get_supply_bundle(self, supply_order_id: int) -> Dict[str, Any]:
-        # items deprecated -> bundle
-        return self.post("/v1/supply-order/bundle", {"supply_order_id": supply_order_id})
-PY
+        return self.post(
+            "/v1/supply-order/bundle",
+            {"supply_order_id": supply_order_id},
+        )
