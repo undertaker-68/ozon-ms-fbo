@@ -64,3 +64,52 @@ def update_customerorder(
     upd.pop("name", None)
     return ms.put(f"/entity/customerorder/{order_id}", upd)
 
+def ensure_customerorder(
+    ms: MoySkladClient,
+    payload: Dict[str, Any],
+    *,
+    dry_run: bool,
+) -> Dict[str, Any]:
+    """
+    Upsert логика:
+    - если заказ с таким name есть → update
+    - если нет → create
+    """
+    name = payload.get("name")
+    if not name:
+        raise ValueError("CustomerOrder payload must contain 'name'")
+
+    existing = find_customerorder_by_name(ms, name)
+
+    if existing:
+        order_id = existing.get("id")
+        if dry_run:
+            return {
+                "action": "dry_run_update",
+                "id": order_id,
+                "name": name,
+                "payload": payload,
+            }
+
+        updated = update_customerorder(ms, order_id, payload)
+        return {
+            "action": "updated",
+            "id": updated.get("id"),
+            "name": updated.get("name"),
+        }
+
+    # заказа нет → создаём
+    if dry_run:
+        return {
+            "action": "dry_run_create",
+            "name": name,
+            "payload": payload,
+        }
+
+    created = create_customerorder(ms, payload)
+    return {
+        "action": "created",
+        "id": created.get("id"),
+        "name": created.get("name"),
+    }
+
