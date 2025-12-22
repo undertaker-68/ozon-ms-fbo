@@ -49,7 +49,14 @@ class OzonFboClient:
     def list_supplies(self, *, status: Optional[str] = None, limit: int = 100, offset: int = 0) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"limit": limit, "offset": offset}
         if status:
-            payload["status"] = status
+            payload: Dict[str, Any] = {
+                "limit": limit,
+                "offset": offset,
+                "sort_by": "CREATED_AT",
+                "order": "DESC",
+            }
+            if status:
+                payload["status"] = status
 
         # v2 отключали 11.12.2025 -> используем v3, но держим fallback на v2
         return self._post_with_fallback("/v3/supply-order/list", "/v2/supply-order/list", payload)
