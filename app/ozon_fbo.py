@@ -40,20 +40,25 @@ class OzonFboClient:
     def list_supplies(
         self,
         *,
-        status: Optional[str] = None,
+        states: Optional[list[str]] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> Dict[str, Any]:
-        # ВАЖНО: sort_by/order должны быть всегда, иначе Ozon отдаёт 400
+        # Ozon v3 требует filter.states минимум 1 элемент
+        if not states:
+            raise ValueError("Ozon v3 supply list требует states (минимум 1 статус)")
+
         payload: Dict[str, Any] = {
-            "filter": {},
+            "filter": {
+                "states": states,
+            },
             "limit": limit,
             "offset": offset,
-            "sortBy": "1",
-            "order": "2",
+            # оставим как snake_case, потому что ошибку мы увидели именно по filter.states,
+            # а поля сортировки пока будем держать простыми:
+            "sort_by": 1,
+            "order": 2,
         }
-        if status:
-            payload["filter"]["status"] = status
 
         return self._post_with_fallback(
             "/v3/supply-order/list",
