@@ -16,7 +16,7 @@ class MoySkladClient:
         return {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
-            "Accept": "application/json",
+            "Accept": "application/json;charset=utf-8",
         }
 
     def get(self, path: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
