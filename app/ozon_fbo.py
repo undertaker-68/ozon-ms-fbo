@@ -46,13 +46,14 @@ class OzonFboClient:
     ) -> Dict[str, Any]:
         # ВАЖНО: sort_by/order должны быть всегда, иначе Ozon отдаёт 400
         payload: Dict[str, Any] = {
+            "filter": {},
             "limit": limit,
             "offset": offset,
             "sortBy": "1",
             "order": "2",
         }
         if status:
-            payload["status"] = status
+            payload["filter"]["status"] = status
 
         return self._post_with_fallback(
             "/v3/supply-order/list",
