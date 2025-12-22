@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List
 
-from .http import request_json, HttpError
+from .http import request_json
 
 
 @dataclass(frozen=True)
@@ -26,56 +26,22 @@ class OzonFboClient:
             self.base_url + path,
             headers=self.headers,
             json_body=payload,
+            timeout=30,
         )
 
-    def _post_with_fallback(self, primary: str, fallback: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        try:
-            return self.post(primary, payload)
-        except HttpError as e:
-            # если v3 недоступен — пробуем v2
-            if str(e).startswith("404 ") or " 404 " in str(e):
-                return self.post(fallback, payload)
-            raise
-
-    def list_supplies(
+    def list_supply_order_ids(
         self,
-        *,
-        states: Optional[list[str]] = None,
+        states: List[str],
+        from_supply_order_id: int = 0,
         limit: int = 100,
-        offset: int = 0,
     ) -> Dict[str, Any]:
-        # Ozon v3 требует filter.states минимум 1 элемент
-        if not states:
-            raise ValueError("Ozon v3 supply list требует states (минимум 1 статус)")
-
-        payload: Dict[str, Any] = {
-            "filter": {
-                "states": states,
-            },
-            "limit": limit,
-            "offset": offset,
-            # оставим как snake_case, потому что ошибку мы увидели именно по filter.states,
-            # а поля сортировки пока будем держать простыми:
-            "sort_by": 1,
-            "order": 2,
+        # ВАЖНО: list использует ORDER_STATE_*
+        payload = {
+            "filter": {"states": states},
+            "paging": {"from_supply_order_id": from_supply_order_id, "limit": limit},
         }
+        return self.post("/v3/supply-order/list", payload)
 
-        return self._post_with_fallback(
-            "/v3/supply-order/list",
-            "/v2/supply-order/list",
-            payload,
-        )
-
-    def get_supply(self, supply_order_id: int) -> Dict[str, Any]:
-        payload = {"supply_order_id": supply_order_id}
-        return self._post_with_fallback(
-            "/v3/supply-order/get",
-            "/v2/supply-order/get",
-            payload,
-        )
-
-    def get_supply_bundle(self, supply_order_id: int) -> Dict[str, Any]:
-        return self.post(
-            "/v1/supply-order/bundle",
-            {"supply_order_id": supply_order_id},
-        )
+    def get_supply_orders(self, order_ids: List[int]) -> Dict[str, Any]:
+        # ВАЖНО: get принимает массив id (order_ids)
+        return self.post("/v3/supply-order/get", {"order_ids": order_ids})
