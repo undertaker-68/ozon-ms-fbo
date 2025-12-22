@@ -35,10 +35,11 @@ class OzonFboClient:
         from_supply_order_id: int = 0,
         limit: int = 100,
     ) -> Dict[str, Any]:
-        # ВАЖНО: list использует ORDER_STATE_*
+        # limit должен быть на верхнем уровне (1..100)
         payload = {
             "filter": {"states": states},
-            "paging": {"from_supply_order_id": from_supply_order_id, "limit": limit},
+            "limit": limit,
+            "from_supply_order_id": from_supply_order_id,
         }
         return self.post("/v3/supply-order/list", payload)
 
