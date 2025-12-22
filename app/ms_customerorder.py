@@ -53,3 +53,14 @@ def find_customerorder_by_name(ms: MoySkladClient, name: str) -> Optional[Dict[s
     res = ms.get("/entity/customerorder", params={"filter": f"name={name}", "limit": 1})
     rows = res.get("rows") or []
     return rows[0] if rows else None
+
+def update_customerorder(
+    ms: MoySkladClient,
+    order_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    # name обновлять не нужно, он ключ
+    upd = payload.copy()
+    upd.pop("name", None)
+    return ms.put(f"/entity/customerorder/{order_id}", upd)
+
