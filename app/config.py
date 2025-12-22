@@ -14,15 +14,6 @@ def _env(name: str, default: str | None = None) -> str:
     return v
 
 
-def _env_int(name: str, default: int | None = None) -> int:
-    v = os.getenv(name)
-    if v is None or v == "":
-        if default is None:
-            raise ValueError(f"Missing env var: {name}")
-        return default
-    return int(v)
-
-
 def _env_bool(name: str, default: bool = False) -> bool:
     v = os.getenv(name)
     if v is None or v == "":
@@ -31,11 +22,21 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 @dataclass(frozen=True)
-class Config:
-    ozon_client_id: str
-    ozon_api_key: str
+class OzonCabinet:
+    name: str
+    client_id: str
+    api_key: str
+    ms_saleschannel_id: str
 
-    moysklad_token: str | None
+
+@dataclass(frozen=True)
+class Config:
+    cabinets: list[OzonCabinet]
+
+    moysklad_token: str
+    ms_organization_id: str
+    ms_state_fbo_id: str
+    ms_agent_id: str
 
     fbo_planned_from: date | None
     fbo_dry_run: bool
@@ -45,16 +46,29 @@ def load_config() -> Config:
     load_dotenv()
 
     planned_from_raw = os.getenv("FBO_PLANNED_FROM")
-    planned_from = None
-    if planned_from_raw:
-        planned_from = date.fromisoformat(planned_from_raw)
+    planned_from = date.fromisoformat(planned_from_raw) if planned_from_raw else None
 
-    ms_token = os.getenv("MOYSKLAD_TOKEN") or None
+    cabinets = [
+        OzonCabinet(
+            name="cab1",
+            client_id=_env("OZON1_CLIENT_ID"),
+            api_key=_env("OZON1_API_KEY"),
+            ms_saleschannel_id=_env("MS_SALESCHANNEL_ID_CAB1"),
+        ),
+        OzonCabinet(
+            name="cab2",
+            client_id=_env("OZON2_CLIENT_ID"),
+            api_key=_env("OZON2_API_KEY"),
+            ms_saleschannel_id=_env("MS_SALESCHANNEL_ID_CAB2"),
+        ),
+    ]
 
     return Config(
-        ozon_client_id=_env("OZON_CLIENT_ID"),
-        ozon_api_key=_env("OZON_API_KEY"),
-        moysklad_token=ms_token,
+        cabinets=cabinets,
+        moysklad_token=_env("MOYSKLAD_TOKEN"),
+        ms_organization_id=_env("MS_ORGANIZATION_ID"),
+        ms_state_fbo_id=_env("MS_STATE_FBO_ID"),
+        ms_agent_id=_env("MS_AGENT_ID"),
         fbo_planned_from=planned_from,
         fbo_dry_run=_env_bool("FBO_DRY_RUN", default=True),
     )
