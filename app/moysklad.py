@@ -24,3 +24,6 @@ class MoySkladClient:
 
     def post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         return request_json("POST", self.base_url + path, headers=self.headers, json_body=payload)
+
+    def put(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return request_json("PUT", self.base_url + path, headers=self.headers, json_body=payload)
