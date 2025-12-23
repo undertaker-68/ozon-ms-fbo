@@ -6,6 +6,14 @@ from typing import Dict, Any, List
 from app.config import load_config
 from app.ozon_fbo import OzonFboClient
 from app.moysklad import MoySkladClient
+from app.ms_move import (
+    find_move_by_name,
+    create_move,
+    update_move_position_only,
+    build_move_position_from_order_positions,
+    try_apply_move,
+)
+
 from app.ms_customerorder import (
     CustomerOrderDraft,
     build_customerorder_payload,
@@ -19,6 +27,10 @@ ORGANIZATION_ID = "12d36dcd-8b6c-11e9-9109-f8fc00176e21"
 STORE_ID = "77b4a517-3b82-11f0-0a80-18cb00037a24"
 AGENT_ID = "f61bfcf9-2d74-11ec-0a80-04c700041e03"
 STATE_ID = "921c872f-d54e-11ef-0a80-1823001350aa"
+
+MOVE_STATE_ID = "b0d2c89d-5c7c-11ef-0a80-0cd4001f5885"
+MOVE_SOURCE_STORE_ID = "7cdb9b20-9910-11ec-0a80-08670002d998"
+MOVE_TARGET_STORE_ID = "77b4a517-3b82-11f0-0a80-18cb00037a24"
 
 SALES_CHANNEL_BY_CABINET = {
     0: "fede2826-9fd0-11ee-0a80-0641000f3d25",
@@ -175,6 +187,43 @@ def sync():
                 result = ensure_customerorder(ms, payload, dry_run=cfg.fbo_dry_run)
                 print(result)
 
+                # --- MOVE: создать/обновить перемещение сразу после заказа ---
+                move_name = order_number  # номер любой, но для дедупликации удобно = номер поставки/заказа
+                move_desc = payload.get("description") or f"{order_number}"
+
+                move_positions = build_move_positions_from_order_positions(payload["positions"])
+
+                existing_move = find_move_by_name(ms, move_name)
+
+                if cfg.fbo_dry_run:
+                    if not existing_move:
+                        print({"action": "dry_run_move_create", "name": move_name, "positions": len(move_positions)})
+                    else:
+                        print({"action": "dry_run_move_update", "id": existing_move["id"], "positions": len(move_positions)})
+                else:
+                    if not existing_move:
+                        mv = create_move(
+                            ms,
+                            name=move_name,
+                            description=move_desc,
+                            source_store_id=MOVE_SOURCE_STORE_ID,
+                            target_store_id=MOVE_TARGET_STORE_ID,
+                            state_id=MOVE_STATE_ID,
+                            positions=move_positions,
+                        )
+                        move_id = mv["id"]
+                        print({"action": "move_created", "id": move_id, "name": move_name})
+                    else:
+                        move_id = existing_move["id"]
+                        update_move_positions_only(ms, move_id, positions=move_positions, description=move_desc)
+                        print({"action": "move_updated", "id": move_id, "name": move_name})
+
+                    # пытаемся провести
+                    r = try_apply_move(ms, move_id)
+                    if r.get("applied"):
+                        print({"action": "move_applied", "id": move_id})
+                    else:
+                        print({"action": "move_left_unapplied", "id": move_id, "reason": r.get("reason")})
 
 if __name__ == "__main__":
     sync()
