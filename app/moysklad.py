@@ -28,8 +28,6 @@ class MoySkladClient:
     def put(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         return request_json("PUT", self.base_url + path, headers=self.headers, json_body=payload)
 
-    # ===== ДОБАВИТЬ НИЖЕ =====
-
     def find_product_by_article(self, article: str):
         res = self.get(
             "/entity/product",
