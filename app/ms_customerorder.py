@@ -42,7 +42,8 @@ def build_customerorder_payload(
         "positions": positions,
     }
     if d.shipment_planned_at:
-        payload["shipmentPlannedMoment"] = d.shipment_planned_at.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        payload["deliveryPlannedMoment"] = d.shipment_planned_at.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
     return payload
 
 def create_customerorder(ms: MoySkladClient, payload: Dict[str, Any]) -> Dict[str, Any]:
