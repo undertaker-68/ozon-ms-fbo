@@ -40,7 +40,7 @@ class Config:
 
     fbo_planned_from: date | None
     fbo_dry_run: bool
-
+    fbo_exclude_order_ids: set[int]
 
 def load_config() -> Config:
     load_dotenv()
