@@ -6,6 +6,7 @@ from typing import Dict, Any, List
 from app.config import load_config
 from app.ozon_fbo import OzonFboClient
 from app.moysklad import MoySkladClient
+from app.ms_move import link_move_to_customerorder
 from app.ms_move import (
     find_move_by_name,
     create_move,
@@ -233,6 +234,9 @@ def sync():
                     }
                     ms.put(f"/entity/customerorder/{result['id']}", order_patch)
                     print({"action": "order_linked_to_move", "order_id": result["id"], "move_id": move_id})
+
+                    link_move_to_customerorder(ms, move_id, result["id"])
+                    print({"action": "move_linked_to_order", "move_id": move_id, "order_id": result["id"]})
 
                     # --- попытка провести перемещение ---
                     r = try_apply_move(ms, move_id)
