@@ -27,3 +27,23 @@ class MoySkladClient:
 
     def put(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         return request_json("PUT", self.base_url + path, headers=self.headers, json_body=payload)
+
+    def find_product_by_article(self, article: str):
+        res = self.get("/entity/product", params={"filter": f"article={article}", "limit": 1})
+        rows = res.get("rows") or []
+        return rows[0] if rows else None
+
+    def get_bundle_components(self, bundle_id: str):
+        res = self.get(f"/entity/bundle/{bundle_id}")
+        return (res.get("components") or {}).get("rows") or []
+
+    def get_sale_price(self, product: dict) -> int:
+        prices = product.get("salePrices") or []
+        for p in prices:
+            if (p.get("value") or 0) > 0:
+                return p["value"]
+        return 0
+
+    def has_demand(self, order_name: str) -> bool:
+        res = self.get("/entity/demand", params={"filter": f"description~{order_name}", "limit": 1})
+        return bool(res.get("rows"))
