@@ -4,6 +4,7 @@ from app.config import load_config
 from app.ozon_fbo import OzonFboClient
 from app.moysklad import MoySkladClient
 from app.ms_customerorder import ensure_customerorder
+from datetime import datetime, timezone
 
 from app.ms_move import (
     find_move_by_name,
@@ -65,6 +66,7 @@ SALES_CHANNEL_BY_CABINET = {
 
 def sync():
     cfg = load_config()
+    planned_from = datetime.fromisoformat(cfg.fbo_planned_from).replace(tzinfo=timezone.utc)
     ms = MoySkladClient(cfg.moysklad_token)
 
     for cab_index, cab in enumerate(cfg.cabinets):
@@ -100,6 +102,10 @@ def sync():
                 # ---------------------------------
                 timeslot_from = detail["timeslot"]["timeslot"]["from"]
                 shipment_dt = datetime.fromisoformat(timeslot_from.replace("Z", "+00:00"))
+
+                # фильтр по таймслоту (с 22.12.2025 включительно)
+                if shipment_dt < planned_from:
+                    continue
 
                 supply = detail["supplies"][0]
                 bundle_id = supply["bundle_id"]
