@@ -67,52 +67,41 @@ def update_customerorder(
     upd.pop("name", None)
     return ms.put(f"/entity/customerorder/{order_id}", upd)
 
-def ensure_customerorder(
-    ms: MoySkladClient,
-    payload: Dict[str, Any],
-    *,
-    dry_run: bool,
-) -> Dict[str, Any]:
+def ensure_customerorder(ms, payload: dict, dry_run: bool = False) -> dict:
     """
-    Upsert логика:
-    - если заказ с таким name есть → update
-    - если нет → create
+    Create if not exists.
+    If exists -> update ONLY:
+      - deliveryPlannedMoment
+      - positions
+      - description
+      - store (чтобы не слетал склад)
     """
     name = payload.get("name")
     if not name:
-        raise ValueError("CustomerOrder payload must contain 'name'")
+        raise ValueError("payload.name is required")
 
     existing = find_customerorder_by_name(ms, name)
 
-    if existing:
-        order_id = existing.get("id")
+    # Поля, которые разрешено менять по ТЗ
+    patch = {}
+    if "deliveryPlannedMoment" in payload:
+        patch["deliveryPlannedMoment"] = payload["deliveryPlannedMoment"]
+    if "positions" in payload:
+        patch["positions"] = payload["positions"]
+    if "description" in payload:
+        patch["description"] = payload["description"]
+    if "store" in payload:
+        patch["store"] = payload["store"]
+
+    if not existing:
         if dry_run:
-            return {
-                "action": "dry_run_update",
-                "id": order_id,
-                "name": name,
-                "payload": payload,
-            }
+            return {"action": "dry_run_create", "name": name, "payload": payload}
+        created = create_customerorder(ms, payload)
+        return {"action": "created", "id": created.get("id"), "name": name}
 
-        updated = update_customerorder(ms, order_id, payload)
-        return {
-            "action": "updated",
-            "id": updated.get("id"),
-            "name": updated.get("name"),
-        }
-
-    # заказа нет → создаём
+    # есть заказ -> обновляем только патч
     if dry_run:
-        return {
-            "action": "dry_run_create",
-            "name": name,
-            "payload": payload,
-        }
+        return {"action": "dry_run_update", "id": existing["id"], "name": name, "patch": patch}
 
-    created = create_customerorder(ms, payload)
-    return {
-        "action": "created",
-        "id": created.get("id"),
-        "name": created.get("name"),
-    }
-
+    updated = ms.put(f"/entity/customerorder/{existing['id']}", patch)
+    return {"action": "updated", "id": existing["id"], "name": name, "updated": True}
