@@ -1,82 +1,110 @@
-from __future__ import annotations
+# scripts/sync_fbo_supplies.py
 
-from datetime import datetime, date
-from typing import Any, Dict, List
-
+from datetime import datetime
 from app.config import load_config
 from app.ozon_fbo import OzonFboClient
+from app.moysklad import MoySkladClient
+
+READY_TO_SUPPLY = 2
+DATA_FILLING = 3
+
+ORGANIZATION_ID = "12d36dcd-8b6c-11e9-9109-f8fc00176e21"
+STORE_ID = "77b4a517-3b82-11f0-0a80-18cb00037a24"
+AGENT_ID = "f61bfcf9-2d74-11ec-0a80-04c700041e03"
+STATE_ID = "921c872f-d54e-11ef-0a80-1823001350aa"
+
+SALES_CHANNEL_BY_CABINET = {
+    0: "fede2826-9fd0-11ee-0a80-0641000f3d25",
+    1: "ff2827b8-9fd0-11ee-0a80-0641000f3d31",
+}
 
 
-def _parse_date(s: str | None) -> date | None:
-    if not s:
-        return None
-    # Ozon обычно отдаёт ISO datetime, но бывает и дата. Пробуем аккуратно.
-    try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
-    except Exception:
-        try:
-            return date.fromisoformat(s[:10])
-        except Exception:
-            return None
-
-
-def main() -> None:
+def sync():
     cfg = load_config()
-    oz = OzonFboClient(cfg.ozon_client_id, cfg.ozon_api_key)
+    ms = MoySkladClient(cfg.moysklad_token)
 
-    planned_from = cfg.fbo_planned_from
-    print(f"[FBO] planned_from={planned_from} dry_run={cfg.fbo_dry_run}")
+    for idx, cab in enumerate(cfg.cabinets):
+        oz = OzonFboClient(cab.client_id, cab.api_key)
+        sales_channel = SALES_CHANNEL_BY_CABINET[idx]
 
-    offset = 0
-    limit = 100
-    total_seen = 0
+        for state in (READY_TO_SUPPLY, DATA_FILLING):
+            resp = oz.post(
+                "/v3/supply-order/list",
+                {
+                    "filter": {
+                        "states": [state],
+                        "from_supply_order_id": 0,
+                    },
+                    "limit": 100,
+                    "sort_by": 1,
+                    "sort_dir": "DESC",
+                },
+            )
 
-    while True:
-        data = oz.list_supplies(limit=limit, offset=offset)
-        supplies = (data.get("result") or {}).get("supply_order") or (data.get("result") or {}).get("supplies") or []
+            for order_id in resp.get("order_ids", []):
+                detail = oz.get_supply_orders([order_id])["orders"][0]
 
-        if not supplies:
-            break
+                order_number = detail["order_number"]
 
-        for s in supplies:
-            total_seen += 1
-            supply_id = s.get("supply_order_id") or s.get("id")
-            status = s.get("status")
-            planned_dt = s.get("planned_date") or s.get("delivery_date") or s.get("created_at")
-            planned_date = _parse_date(planned_dt)
+                # если есть Demand — пропускаем
+                if ms.has_demand(order_number):
+                    continue
 
-            if planned_from and planned_date and planned_date < planned_from:
-                continue
+                timeslot_from = detail["timeslot"]["timeslot"]["from"]
+                shipment_date = datetime.fromisoformat(timeslot_from.replace("Z", "+00:00"))
 
-            print(f"\n[FBO] supply_id={supply_id} status={status} planned={planned_dt}")
+                supply = detail["supplies"][0]
+                bundle_id = supply["bundle_id"]
+                warehouse_name = supply["storage_warehouse"]["name"]
 
-            if not supply_id:
-                print("[FBO] skip: no supply_id")
-                continue
+                bundle = oz.post(
+                    "/v1/supply-order/bundle",
+                    {
+                        "bundle_ids": [bundle_id],
+                        "limit": 100,
+                    },
+                )
 
-            # details
-            details = oz.get_supply(int(supply_id))
-            print(f"[FBO] details keys: {list((details.get('result') or {}).keys())}")
+                positions = []
 
-            # items
-            items_resp = oz.get_supply_items(int(supply_id), limit=1000, offset=0)
-            items = (items_resp.get("result") or {}).get("items") or (items_resp.get("result") or {}).get("rows") or []
-            print(f"[FBO] items: {len(items)}")
+                for item in bundle["items"]:
+                    article = item["offer_id"]
+                    qty = item["quantity"]
 
-            # Здесь будет твоя бизнес-логика:
-            # - сопоставление offer_id/article
-            # - создание/обновление документов в МойСклад
-            # - dry_run режим
-            if cfg.fbo_dry_run:
-                print("[FBO] dry_run=1 -> no writes")
-            else:
-                # TODO: интеграция с МойСклад (создание перемещения/поставки/оприходования и т.п.)
-                pass
+                    product = ms.find_product_by_article(article)
+                    if not product:
+                        continue
 
-        offset += limit
+                    if product["meta"]["type"] == "bundle":
+                        components = ms.get_bundle_components(product["id"])
+                        for c in components:
+                            positions.append({
+                                "assortment": c["assortment"],
+                                "quantity": qty * c["quantity"],
+                                "price": ms.get_sale_price(c["assortment"]),
+                            })
+                    else:
+                        positions.append({
+                            "assortment": product["meta"],
+                            "quantity": qty,
+                            "price": ms.get_sale_price(product),
+                        })
 
-    print(f"\n[FBO] done. total_seen={total_seen}")
+                if not positions:
+                    continue
+
+                ms.create_customerorder(
+                    name=order_number,
+                    organization=ORGANIZATION_ID,
+                    agent=AGENT_ID,
+                    store=STORE_ID,
+                    sales_channel=sales_channel,
+                    state=STATE_ID,
+                    shipment_date=shipment_date,
+                    comment=f"{order_number} - {warehouse_name}",
+                    positions=positions,
+                )
 
 
 if __name__ == "__main__":
-    main()
+    sync()
