@@ -115,6 +115,13 @@ def sync():
             )
 
             for order_id in resp.get("order_ids", []):
+                if order_id in cfg.fbo_exclude_order_ids:
+                    print({
+                        "action": "skip_excluded_order",
+                        "order_id": order_id,
+                    })
+                    continue
+
                 detail = oz.get_supply_orders([order_id])["orders"][0]
                 order_number = detail["order_number"]
 
