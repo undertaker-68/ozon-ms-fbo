@@ -3,6 +3,7 @@ from datetime import datetime
 from app.config import load_config
 from app.ozon_fbo import OzonFboClient
 from app.moysklad import MoySkladClient
+from app.ms_customerorder import ensure_customerorder
 
 from app.ms_move import (
     find_move_by_name,
@@ -152,7 +153,7 @@ def sync():
                     "positions": positions,
                 }
 
-                result = ms.ensure_customerorder(payload, dry_run=cfg.fbo_dry_run)
+                result = ensure_customerorder(ms, payload, dry_run=cfg.fbo_dry_run)
                 print(result)
 
                 move_name = order_number
