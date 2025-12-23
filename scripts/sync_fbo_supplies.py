@@ -79,9 +79,10 @@ def _positions_from_bundle_item(ms: MoySkladClient, offer_id: str, qty: float) -
             if not ass_full:
                 continue
             price = ms.get_sale_price(ass_full)
+            assortment = ass if "meta" in ass else {"meta": ass}
             out.append(
                 {
-                    "assortment": ass,  # meta компонента
+                    "assortment": assortment,  # meta компонента
                     "quantity": qty * comp_qty,
                     "price": price,
                 }
@@ -96,7 +97,7 @@ def _positions_from_bundle_item(ms: MoySkladClient, offer_id: str, qty: float) -
     price = ms.get_sale_price(p)
     return [
         {
-            "assortment": p["meta"],
+            "assortment": {"meta": p["meta"]},
             "quantity": qty,
             "price": price,
         }
