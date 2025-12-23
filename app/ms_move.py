@@ -91,7 +91,7 @@ def try_apply_move(ms, move_id: str) -> Dict[str, Any]:
         return {"applied": True, "move": updated}
     except HttpError as e:
         msg = str(e)
-        if "Нельзя переместить товар которого нет на складе" in msg:
+        if "Нельзя переместить товар" in msg and "нет на складе" in msg:
             return {"applied": False, "reason": "not_enough_stock"}
         # любая другая ошибка — пробрасываем
         raise
