@@ -62,6 +62,31 @@ SALES_CHANNEL_BY_CABINET = {
     1: "ff2827b8-9fd0-11ee-0a80-0641000f3d31",
 }
 
+MS_BASE = "https://api.moysklad.ru/api/remap/1.2"
+
+def ms_ref(entity: str, id_: str):
+    return {
+        "meta": {
+            "href": f"{MS_BASE}/entity/{entity}/{id_}",
+            "type": entity,
+            "mediaType": "application/json",
+        }
+    }
+
+def ms_state_ref(entity: str, state_id: str):
+    return {
+        "meta": {
+            "href": f"{MS_BASE}/entity/{entity}/metadata/states/{state_id}",
+            "type": "state",
+            "mediaType": "application/json",
+            "metadataHref": f"{MS_BASE}/entity/{entity}/metadata",
+        }
+    }
+
+def ms_moment(dt: datetime) -> str:
+    # МС ждёт формат вида: '2025-12-25 11:00:00.000' (без timezone)
+    dt_utc = dt.astimezone(timezone.utc)
+    return dt_utc.strftime("%Y-%m-%d %H:%M:%S.000")
 
 def sync():
     cfg = load_config()
@@ -152,13 +177,13 @@ def sync():
 
                 payload = {
                     "name": order_number,
-                    "organization": ORGANIZATION_ID,
-                    "agent": AGENT_ID,
-                    "store": STORE_ID,
-                    "sales_channel": sales_channel,
-                    "state": ORDER_STATE_ID,
-                    "shipment_date": shipment_dt,
-                    "comment": f"{order_number} - {warehouse_name}",
+                    "organization": ms_ref("organization", ORGANIZATION_ID),
+                    "agent": ms_ref("counterparty", AGENT_ID),
+                    "state": ms_state_ref("customerorder", ORDER_STATE_ID),
+                    "salesChannel": ms_ref("saleschannel", sales_channel),
+                    "description": f"{order_number} - {warehouse_name}",
+                    "store": ms_ref("store", STORE_ID),
+                    "deliveryPlannedMoment": ms_moment(shipment_dt),
                     "positions": positions,
                 }
 
