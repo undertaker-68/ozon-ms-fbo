@@ -28,8 +28,11 @@ class CustomerOrderDraft:
     description: str  # комментарий
 
 
-def build_customerorder_payload(d: CustomerOrderDraft, positions: list[dict]) -> Dict[str, Any]:
-    payload = {
+def build_customerorder_payload(
+    d: CustomerOrderDraft,
+    positions: list[dict],
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
         "name": d.name,
         "organization": _ms_ref("organization", d.organization_id),
         "agent": _ms_ref("counterparty", d.agent_id),
