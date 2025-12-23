@@ -191,7 +191,7 @@ def sync():
                 print(result)
 
                 move_name = order_number
-                move_desc = payload["comment"]
+                move_desc = payload["description"]
                 move_positions = build_move_positions_from_order_positions(positions)
 
                 existing_move = find_move_by_name(ms, move_name)
