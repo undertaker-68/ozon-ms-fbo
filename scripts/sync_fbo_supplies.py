@@ -240,21 +240,6 @@ def sync():
                         update_move_positions_only(ms, move_id, positions=move_positions, description=move_desc)
                         print({"action": "move_updated", "id": move_id, "name": move_name})
 
-                    # --- ВАЖНО: привязка перемещения к заказу ---
-                    order_patch = {
-                        "documents": [
-                            {
-                                "meta": {
-                                    "href": f"https://api.moysklad.ru/api/remap/1.2/entity/move/{move_id}",
-                                    "type": "move",
-                                    "mediaType": "application/json",
-                                }
-                            }
-                        ]
-                    }
-                    ms.put(f"/entity/customerorder/{result['id']}", order_patch)
-                    print({"action": "order_linked_to_move", "order_id": result["id"], "move_id": move_id})
-
                     link_move_to_customerorder(ms, move_id, result["id"])
                     print({"action": "move_linked_to_order", "move_id": move_id, "order_id": result["id"]})
 
