@@ -90,6 +90,10 @@ def sync():
                 detail = oz.get_supply_orders([order_id])["orders"][0]
                 order_number = detail["order_number"]
 
+                # отменённые поставки полностью игнорируем
+                if detail.get("state") == "CANCELLED":
+                    continue
+
                 # ---------------------------------
                 # ЕСЛИ УЖЕ ЕСТЬ ОТГРУЗКА → НИЧЕГО НЕ ДЕЛАЕМ
                 # ---------------------------------
