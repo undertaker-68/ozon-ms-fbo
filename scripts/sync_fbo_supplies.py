@@ -7,6 +7,14 @@ from app.config import load_config
 from app.ozon_fbo import OzonFboClient
 from app.moysklad import MoySkladClient
 from app.ms_move import link_move_to_customerorder
+
+from app.ms_demand import (
+    find_demand_by_name,
+    create_demand,
+    build_demand_positions_from_order_positions,
+    try_apply_demand,
+)
+
 from app.ms_move import (
     find_move_by_name,
     create_move,
@@ -34,6 +42,11 @@ STATE_ID = "921c872f-d54e-11ef-0a80-1823001350aa"
 MOVE_STATE_ID = "b0d2c89d-5c7c-11ef-0a80-0cd4001f5885"
 MOVE_SOURCE_STORE_ID = "7cdb9b20-9910-11ec-0a80-08670002d998"
 MOVE_TARGET_STORE_ID = "77b4a517-3b82-11f0-0a80-18cb00037a24"
+
+DEMAND_STATE_ID = "b543e330-44e4-11f0-0a80-0da5002260ab"
+
+# статусы Озон, при которых нужна отгрузка
+DEMAND_OZON_STATES = {3, 4, 5}  # ACCEPTED_AT_SUPPLY_WAREHOUSE, IN_TRANSIT, ACCEPTANCE_AT_STORAGE_WAREHOUSE
 
 SALES_CHANNEL_BY_CABINET = {
     0: "fede2826-9fd0-11ee-0a80-0641000f3d25",
@@ -148,7 +161,7 @@ def sync():
                 order_number = detail["order_number"]
 
                 # Если уже есть Demand — ничего не делаем
-                if ms.has_demand(order_number):
+                if find_demand_by_name(ms, order_number):
                     continue
 
                 # Плановая дата отгрузки (таймслот)
@@ -251,6 +264,31 @@ def sync():
                         print({"action": "move_applied", "id": move_id})
                     else:
                         print({"action": "move_left_unapplied", "id": move_id, "reason": r.get("reason")})
+
+                # --- DEMAND: создаём отгрузку для статусов 3/4/5 (если ещё нет) ---
+                if state in DEMAND_OZON_STATES:
+                    existing_demand = find_demand_by_name(ms, order_number)
+                    if not existing_demand:
+                        demand_positions = build_demand_positions_from_order_positions(payload["positions"])
+                        dem = create_demand(
+                            ms,
+                            name=order_number,
+                            description=move_desc,              # комментарий дублируем
+                            organization_id=ORGANIZATION_ID,
+                            agent_id=AGENT_ID,
+                            store_id=STORE_ID,                  # склад как в заказе (FBO)
+                            state_id=DEMAND_STATE_ID,
+                            customerorder_id=result["id"],      # связь demand -> заказ
+                            positions=demand_positions,
+                        )
+                        demand_id = dem["id"]
+                        print({"action": "demand_created", "id": demand_id, "name": order_number})
+
+                        r2 = try_apply_demand(ms, demand_id)
+                        if r2.get("applied"):
+                            print({"action": "demand_applied", "id": demand_id})
+                        else:
+                            print({"action": "demand_left_unapplied", "id": demand_id, "reason": r2.get("reason")})
 
 if __name__ == "__main__":
     sync()
