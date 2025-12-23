@@ -216,64 +216,71 @@ def sync():
 
                 existing_move = find_move_by_name(ms, move_name)
 
-                if cfg.fbo_dry_run:
-                    if not existing_move:
-                        print({"action": "dry_run_move_create", "name": move_name, "positions": len(move_positions)})
-                    else:
-                        print({"action": "dry_run_move_update", "id": existing_move["id"], "positions": len(move_positions)})
-                else:
-                    if not existing_move:
-                        mv = create_move(
-                            ms,
-                            name=move_name,
-                            description=move_desc,
-                            organization_id=ORGANIZATION_ID,
-                            source_store_id=MOVE_SOURCE_STORE_ID,
-                            target_store_id=MOVE_TARGET_STORE_ID,
-                            state_id=MOVE_STATE_ID,
-                            positions=move_positions,
-                        )
-                        move_id = mv["id"]
-                        print({"action": "move_created", "id": move_id, "name": move_name})
-                    else:
-                        move_id = existing_move["id"]
-                        update_move_positions_only(ms, move_id, positions=move_positions, description=move_desc)
-                        print({"action": "move_updated", "id": move_id, "name": move_name})
+if cfg.fbo_dry_run:
+    if not existing_move:
+        print({"action": "dry_run_move_create", "name": move_name, "positions": len(move_positions)})
+    else:
+        print({"action": "dry_run_move_update", "id": existing_move["id"], "positions": len(move_positions)})
 
-                    link_move_to_customerorder(ms, move_id, result["id"])
-                    print({"action": "move_linked_to_order", "move_id": move_id, "order_id": result["id"]})
+    # DEMAND в dry-run не создаём, только логируем намерение
+    if state in DEMAND_OZON_STATES and not find_demand_by_name(ms, order_number):
+        print({"action": "dry_run_demand_create", "name": order_number, "positions": len(payload["positions"])})
 
-                    # --- попытка провести перемещение ---
-                    r = try_apply_move(ms, move_id)
-                    if r.get("applied"):
-                        print({"action": "move_applied", "id": move_id})
-                    else:
-                        print({"action": "move_left_unapplied", "id": move_id, "reason": r.get("reason")})
+else:
+    # --- MOVE create/update ---
+    if not existing_move:
+        mv = create_move(
+            ms,
+            name=move_name,
+            description=move_desc,
+            organization_id=ORGANIZATION_ID,
+            source_store_id=MOVE_SOURCE_STORE_ID,
+            target_store_id=MOVE_TARGET_STORE_ID,
+            state_id=MOVE_STATE_ID,
+            positions=move_positions,
+        )
+        move_id = mv["id"]
+        print({"action": "move_created", "id": move_id, "name": move_name})
+    else:
+        move_id = existing_move["id"]
+        update_move_positions_only(ms, move_id, positions=move_positions, description=move_desc)
+        print({"action": "move_updated", "id": move_id, "name": move_name})
 
-                # --- DEMAND: создаём отгрузку для статусов 3/4/5 (если ещё нет) ---
-                if state in DEMAND_OZON_STATES:
-                    existing_demand = find_demand_by_name(ms, order_number)
-                    if not existing_demand:
-                        demand_positions = build_demand_positions_from_order_positions(payload["positions"])
-                        dem = create_demand(
-                            ms,
-                            name=order_number,
-                            description=move_desc,              # комментарий дублируем
-                            organization_id=ORGANIZATION_ID,
-                            agent_id=AGENT_ID,
-                            store_id=STORE_ID,                  # склад как в заказе (FBO)
-                            state_id=DEMAND_STATE_ID,
-                            customerorder_id=result["id"],      # связь demand -> заказ
-                            positions=demand_positions,
-                        )
-                        demand_id = dem["id"]
-                        print({"action": "demand_created", "id": demand_id, "name": order_number})
+    # связь move -> order (это то, что реально работает в МС)
+    link_move_to_customerorder(ms, move_id, result["id"])
+    print({"action": "move_linked_to_order", "move_id": move_id, "order_id": result["id"]})
 
-                        r2 = try_apply_demand(ms, demand_id)
-                        if r2.get("applied"):
-                            print({"action": "demand_applied", "id": demand_id})
-                        else:
-                            print({"action": "demand_left_unapplied", "id": demand_id, "reason": r2.get("reason")})
+    # попытка провести перемещение
+    r = try_apply_move(ms, move_id)
+    if r.get("applied"):
+        print({"action": "move_applied", "id": move_id})
+    else:
+        print({"action": "move_left_unapplied", "id": move_id, "reason": r.get("reason")})
+
+    # --- DEMAND: создаём отгрузку только в боевом режиме ---
+    if state in DEMAND_OZON_STATES:
+        existing_demand = find_demand_by_name(ms, order_number)
+        if not existing_demand:
+            demand_positions = build_demand_positions_from_order_positions(payload["positions"])
+            dem = create_demand(
+                ms,
+                name=order_number,
+                description=move_desc,              # комментарий дублируем
+                organization_id=ORGANIZATION_ID,
+                agent_id=AGENT_ID,
+                store_id=STORE_ID,                  # склад как в заказе (FBO)
+                state_id=DEMAND_STATE_ID,
+                customerorder_id=result["id"],      # связь demand -> заказ
+                positions=demand_positions,
+            )
+            demand_id = dem["id"]
+            print({"action": "demand_created", "id": demand_id, "name": order_number})
+
+            r2 = try_apply_demand(ms, demand_id)
+            if r2.get("applied"):
+                print({"action": "demand_applied", "id": demand_id})
+            else:
+                print({"action": "demand_left_unapplied", "id": demand_id, "reason": r2.get("reason")})
 
 if __name__ == "__main__":
     sync()
