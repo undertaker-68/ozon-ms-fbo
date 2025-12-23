@@ -28,20 +28,19 @@ class CustomerOrderDraft:
     description: str  # комментарий
 
 
-def build_customerorder_payload(d: CustomerOrderDraft) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {
+def build_customerorder_payload(d: CustomerOrderDraft, positions: list[dict]) -> Dict[str, Any]:
+    payload = {
         "name": d.name,
         "organization": _ms_ref("organization", d.organization_id),
         "agent": _ms_ref("counterparty", d.agent_id),
         "state": _ms_ref("state", d.state_id),
         "salesChannel": _ms_ref("saleschannel", d.saleschannel_id),
         "description": d.description,
+        "positions": positions,
     }
     if d.shipment_planned_at:
-        # МойСклад принимает ISO-дату/время
         payload["shipmentPlanned"] = d.shipment_planned_at.isoformat()
     return payload
-
 
 def create_customerorder(ms: MoySkladClient, payload: Dict[str, Any]) -> Dict[str, Any]:
     return ms.post("/entity/customerorder", payload)
