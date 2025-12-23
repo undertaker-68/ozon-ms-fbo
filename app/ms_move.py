@@ -80,6 +80,11 @@ def update_move_positions_only(ms, move_id: str, *, positions: List[Dict[str, An
     }
     return ms.put(f"/entity/move/{move_id}", patch)
 
+def link_move_to_customerorder(ms, move_id: str, customerorder_id: str) -> dict:
+    patch = {
+        "customerOrder": _ms_ref("customerorder", customerorder_id)
+    }
+    return ms.put(f"/entity/move/{move_id}", patch)
 
 def try_apply_move(ms, move_id: str) -> Dict[str, Any]:
     """
