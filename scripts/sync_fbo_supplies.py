@@ -66,7 +66,7 @@ SALES_CHANNEL_BY_CABINET = {
 
 def sync():
     cfg = load_config()
-    planned_from = cfg.fbo_planned_from
+    planned_from = datetime.combine(cfg.fbo_planned_from, datetime.min.time()).replace(tzinfo=timezone.utc)
     ms = MoySkladClient(cfg.moysklad_token)
 
     for cab_index, cab in enumerate(cfg.cabinets):
