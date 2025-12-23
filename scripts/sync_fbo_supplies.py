@@ -206,6 +206,7 @@ def sync():
                             ms,
                             name=move_name,
                             description=move_desc,
+                            organization_id=ORGANIZATION_ID,
                             source_store_id=MOVE_SOURCE_STORE_ID,
                             target_store_id=MOVE_TARGET_STORE_ID,
                             state_id=MOVE_STATE_ID,
