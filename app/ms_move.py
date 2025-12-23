@@ -53,6 +53,7 @@ def create_move(
     *,
     name: str,
     description: str,
+    organization_id: str,
     source_store_id: str,
     target_store_id: str,
     state_id: str,
@@ -61,6 +62,7 @@ def create_move(
     payload: Dict[str, Any] = {
         "name": name,
         "description": description,
+        "organization": _ms_ref("organization", organization_id),
         "sourceStore": _ms_ref("store", source_store_id),
         "targetStore": _ms_ref("store", target_store_id),
         "state": _ms_state_ref("move", state_id),
