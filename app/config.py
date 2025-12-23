@@ -71,4 +71,15 @@ def load_config() -> Config:
         ms_agent_id=_env("MS_AGENT_ID"),
         fbo_planned_from=planned_from,
         fbo_dry_run=_env_bool("FBO_DRY_RUN", default=True),
+        fbo_exclude_order_ids=fbo_exclude_order_ids,
     )
+    
+    raw_exclude = os.getenv("FBO_EXCLUDE_ORDER_IDS", "").strip()
+    fbo_exclude_order_ids = set()
+
+    if raw_exclude:
+        fbo_exclude_order_ids = {
+            int(x.strip())
+            for x in raw_exclude.split(",")
+            if x.strip().isdigit()
+        }
