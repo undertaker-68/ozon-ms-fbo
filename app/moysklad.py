@@ -28,8 +28,13 @@ class MoySkladClient:
     def put(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         return request_json("PUT", self.base_url + path, headers=self.headers, json_body=payload)
 
+       # ===== ДОБАВИТЬ НИЖЕ =====
+
     def find_product_by_article(self, article: str):
-        res = self.get("/entity/product", params={"filter": f"article={article}", "limit": 1})
+        res = self.get(
+            "/entity/product",
+            params={"filter": f"article={article}", "limit": 1},
+        )
         rows = res.get("rows") or []
         return rows[0] if rows else None
 
@@ -38,12 +43,18 @@ class MoySkladClient:
         return (res.get("components") or {}).get("rows") or []
 
     def get_sale_price(self, product: dict) -> int:
+        # базовая цена продажи
         prices = product.get("salePrices") or []
         for p in prices:
-            if (p.get("value") or 0) > 0:
-                return p["value"]
+            value = p.get("value")
+            if value:
+                return int(value)
         return 0
 
     def has_demand(self, order_name: str) -> bool:
-        res = self.get("/entity/demand", params={"filter": f"description~{order_name}", "limit": 1})
+        # если по заказу уже есть отгрузка — не трогаем
+        res = self.get(
+            "/entity/demand",
+            params={"filter": f"description~{order_name}", "limit": 1},
+        )
         return bool(res.get("rows"))
