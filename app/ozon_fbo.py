@@ -39,7 +39,6 @@ class OzonFboClient:
             "sort_by": 1,
             "sort_dir": "ASC",
         }
-        print("DEBUG payload:", payload)
         return self.post("/v3/supply-order/list", payload)
 
     def get_supply_orders(self, order_ids: List[int]) -> Dict[str, Any]:
