@@ -9,8 +9,8 @@ from app.moysklad import MoySkladClient
 from app.ms_move import (
     find_move_by_name,
     create_move,
-    update_move_position_only,
-    build_move_position_from_order_positions,
+    update_move_positions_only,
+    build_move_positions_from_order_positions,
     try_apply_move,
 )
 
