@@ -34,19 +34,20 @@ def find_move_by_name(ms, name: str) -> Optional[dict]:
 
 
 def build_move_positions_from_order_positions(order_positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Перемещение: берём только assortment+quantity.
-    (price для move не нужен)
-    """
     out: List[Dict[str, Any]] = []
     for p in order_positions:
         ass = p.get("assortment")
         qty = p.get("quantity")
+        price = p.get("price")
+
         if not ass or qty is None:
             continue
-        out.append({"assortment": ass, "quantity": qty})
-    return out
 
+        row = {"assortment": ass, "quantity": qty}
+        if price is not None:
+            row["price"] = price  # цена как в заказе (цена продажи)
+        out.append(row)
+    return out
 
 def create_move(
     ms,
