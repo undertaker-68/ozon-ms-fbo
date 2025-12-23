@@ -127,7 +127,12 @@ def sync():
         oz = OzonFboClient(cab.client_id, cab.api_key)
         sales_channel = SALES_CHANNEL_BY_CABINET.get(idx) or cab.ms_saleschannel_id
 
-        for state in (READY_TO_SUPPLY, DATA_FILLING):
+        for state in (
+            READY_TO_SUPPLY,
+            IN_TRANSIT,
+            ACCEPTANCE_AT_STORAGE_WAREHOUSE,
+            ACCEPTED_AT_SUPPLY_WAREHOUSE,
+        ):
             resp = oz.post(
                 "/v3/supply-order/list",
                 {
