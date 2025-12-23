@@ -29,17 +29,16 @@ class OzonFboClient:
             timeout=30,
         )
 
-    def list_supply_order_ids(
-        self,
-        states: List[str],
-        from_supply_order_id: int = 0,
-        limit: int = 100,
-    ) -> Dict[str, Any]:
-        # limit должен быть на верхнем уровне (1..100)
+    def list_supply_order_ids(self, states, limit=100, from_supply_order_id=0):
         payload = {
-            "filter": {"states": states},
+            "filter": {
+                "states": states,
+                "from_supply_order_id": from_supply_order_id,
+            },
             "limit": limit,
-            "from_supply_order_id": from_supply_order_id,
+            # УБРАТЬ sort_by/sort_dir с дефолтом 0
+            # "sort_by": 0,
+            # "sort_dir": "ASC",
         }
         return self.post("/v3/supply-order/list", payload)
 
