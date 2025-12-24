@@ -159,29 +159,32 @@ def sync():
                     article = item["offer_id"]
                     qty = item["quantity"]
 
-                    product = ms.find_product_by_article(article)
-                    if not product:
+                    ass = ms.find_assortment_by_article(article)
+                    if not ass:
+                        print({"action": "skip_no_assortment", "article": article, "order": order_number})
                         continue
 
-                    if product["meta"]["type"] == "bundle":
-                        components = ms.get_bundle_components(product["id"])
-                        for c in components:
-                            positions.append(
-                                {
-                                    "assortment": {"meta": c["assortment"]},
-                                    "quantity": qty * c["quantity"],
-                                    "price": ms.get_sale_price(c["assortment"]),
-                                }
-                            )
-                    else:
-                        positions.append(
-                            {
-                                "assortment": {"meta": product["meta"]},
-                                "quantity": qty,
-                                "price": ms.get_sale_price(product),
-                            }
-                        )
+                    ass_type = (ass.get("meta") or {}).get("type")  # product / variant / bundle
 
+                    if ass_type == "bundle":
+                        components = ms.get_bundle_components(ass["id"])
+                        if not components:
+                            print({"action": "skip_bundle_no_components", "article": article, "order": order_number})
+                            continue
+
+                        for c in components:
+                            positions.append({
+                                "assortment": {"meta": c["assortment"]},
+                                "quantity": float(qty) * float(c["quantity"]),
+                                "price": ms.get_sale_price(c["assortment"]),
+                            })
+                    else:
+                        positions.append({
+                            "assortment": {"meta": ass["meta"]},
+                            "quantity": float(qty),
+                            "price": ms.get_sale_price(ass),
+                        })
+    
                 if not positions:
                     continue
 
