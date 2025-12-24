@@ -36,6 +36,12 @@ class MoySkladClient:
         rows = res.get("rows") or []
         return rows[0] if rows else None
 
+    def find_assortment_by_article(self, article: str):
+        # assortment возвращает product/variant/bundle
+        res = self.get("/entity/assortment", params={"filter": f"article={article}", "limit": 1})
+        rows = res.get("rows") or []
+        return rows[0] if rows else None
+
     def get_bundle_components(self, bundle_id: str):
         res = self.get(f"/entity/bundle/{bundle_id}")
         return (res.get("components") or {}).get("rows") or []
