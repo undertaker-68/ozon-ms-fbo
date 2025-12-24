@@ -35,8 +35,11 @@ def request_json(
                 headers=headers,
                 params=params,
                 json=json_body,
-                timeout=timeout,
+                timeout=(10, timeout),
             )
+        except requests.Timeout as e:
+            last_exc = HttpError(f"TIMEOUT {method} {url}")
+            continue
         except requests.RequestException as e:
             last_exc = e
             continue
