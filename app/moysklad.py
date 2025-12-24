@@ -43,8 +43,16 @@ class MoySkladClient:
         return rows[0] if rows else None
 
     def get_bundle_components(self, bundle_id: str):
-        res = self.get(f"/entity/bundle/{bundle_id}")
-        return (res.get("components") or {}).get("rows") or []
+        # ВАЖНО: без expand МС часто не отдаёт rows компонентов
+        b = self.get(f"/entity/bundle/{bundle_id}", params={"expand": "components.assortment"})
+        comps = ((b.get("components") or {}).get("rows")) or []
+        out = []
+        for c in comps:
+            qty = float(c.get("quantity") or 0)
+            ass = (((c.get("assortment") or {}).get("meta")) or (c.get("assortment") or {}))
+            if ass and qty:
+                out.append({"assortment": ass, "quantity": qty})
+        return out
 
     def get_sale_price(self, product: dict) -> int:
         # базовая цена продажи
