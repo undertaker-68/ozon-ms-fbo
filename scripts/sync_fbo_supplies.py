@@ -167,7 +167,7 @@ def sync():
                     "agent": {"meta": {"href": f"{ms.base_url}/entity/counterparty/{AGENT_ID}", "type": "counterparty", "mediaType": "application/json"}},
                     "state": {"meta": {"href": f"{ms.base_url}/entity/state/{ORDER_STATE_ID}", "type": "state", "mediaType": "application/json"}},
                     "salesChannel": {"meta": {"href": f"{ms.base_url}/entity/saleschannel/{sales_channel}", "type": "saleschannel", "mediaType": "application/json"}},
-                    "description": f"{order_number} - {warehouse_name}",
+                    "description": f"{order_number} - {supply.get('storage_warehouse', {}).get('name', 'Unknown Warehouse')}",
                     "positions": positions,
                     "deliveryPlannedMoment": shipment_dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
                     "store": {"meta": {"href": f"{ms.base_url}/entity/store/{STORE_ID}", "type": "store", "mediaType": "application/json"}},
