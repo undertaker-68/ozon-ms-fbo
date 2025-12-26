@@ -31,6 +31,13 @@ class MoySkladClient:
     def delete(self, path: str) -> Dict[str, Any]:
         return request_json("DELETE", self.base_url + path, headers=self.headers)
 
+    def get_bundle_components(self, bundle_id: str):
+        """
+        Возвращает компоненты комплекта по его ID.
+        """
+        res = self.get(f"/entity/product/{bundle_id}/components")
+        return res.get("rows", [])
+
     def find_assortment_by_article(self, article: str):
         res = self.get("/entity/assortment", params={"filter": f"article={article}", "limit": 1})
         rows = res.get("rows") or []
