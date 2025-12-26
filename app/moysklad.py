@@ -31,6 +31,11 @@ class MoySkladClient:
     def delete(self, path: str) -> Dict[str, Any]:
         return request_json("DELETE", self.base_url + path, headers=self.headers)
 
+    def find_assortment_by_article(self, article: str):
+        res = self.get("/entity/assortment", params={"filter": f"article={article}", "limit": 1})
+        rows = res.get("rows") or []
+        return rows[0] if rows else None
+
     # ---- helpers ----
 
     def get_sale_price(self, product: Dict[str, Any]) -> int:
