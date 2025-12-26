@@ -28,45 +28,19 @@ class MoySkladClient:
     def put(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         return request_json("PUT", self.base_url + path, headers=self.headers, json_body=payload)
 
-    def find_product_by_article(self, article: str):
-        res = self.get(
-            "/entity/product",
-            params={"filter": f"article={article}", "limit": 1},
-        )
-        rows = res.get("rows") or []
-        return rows[0] if rows else None
+    def delete(self, path: str) -> Dict[str, Any]:
+        return request_json("DELETE", self.base_url + path, headers=self.headers)
 
-    def find_assortment_by_article(self, article: str):
-        # assortment возвращает product/variant/bundle
-        res = self.get("/entity/assortment", params={"filter": f"article={article}", "limit": 1})
-        rows = res.get("rows") or []
-        return rows[0] if rows else None
+    # ---- helpers ----
 
-    def get_bundle_components(self, bundle_id: str):
-        # ВАЖНО: без expand МС часто не отдаёт rows компонентов
-        b = self.get(f"/entity/bundle/{bundle_id}", params={"expand": "components.assortment"})
-        comps = ((b.get("components") or {}).get("rows")) or []
-        out = []
-        for c in comps:
-            qty = float(c.get("quantity") or 0)
-            ass = (((c.get("assortment") or {}).get("meta")) or (c.get("assortment") or {}))
-            if ass and qty:
-                out.append({"assortment": ass, "quantity": qty})
-        return out
-
-    def get_sale_price(self, product: dict) -> int:
-        # базовая цена продажи
+    def get_sale_price(self, product: Dict[str, Any]) -> int:
+        """
+        Берём базовую цену продажи (первую ненулевую) из salePrices.value.
+        Возвращаем int в копейках.
+        """
         prices = product.get("salePrices") or []
         for p in prices:
             value = p.get("value")
             if value:
                 return int(value)
         return 0
-
-    def has_demand(self, order_name: str) -> bool:
-        # если по заказу уже есть отгрузка — не трогаем
-        res = self.get(
-            "/entity/demand",
-            params={"filter": f"description~{order_name}", "limit": 1},
-        )
-        return bool(res.get("rows"))
