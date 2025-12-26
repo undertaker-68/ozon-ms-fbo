@@ -19,7 +19,9 @@ from app.ms_demand import (
     try_apply_demand,
 )
 
+# =========================
 # OZON STATES (numeric)
+# =========================
 READY_TO_SUPPLY = 2
 ACCEPTED_AT_SUPPLY_WAREHOUSE = 3
 IN_TRANSIT = 4
@@ -35,7 +37,6 @@ SYNC_STATES = (
     COMPLETED,
 )
 
-# Отгрузки создаём для этих статусов
 DEMAND_OZON_STATES = {
     ACCEPTED_AT_SUPPLY_WAREHOUSE,
     IN_TRANSIT,
@@ -43,7 +44,9 @@ DEMAND_OZON_STATES = {
     COMPLETED,
 }
 
-# Константы МС (как у тебя)
+# =========================
+# MOYSKLAD CONSTANTS
+# =========================
 ORGANIZATION_ID = "12d36dcd-8b6c-11e9-9109-f8fc00176e21"
 STORE_ID = "77b4a517-3b82-11f0-0a80-18cb00037a24"  # FBO склад
 AGENT_ID = "f61bfcf9-2d74-11ec-0a80-04c700041e03"
@@ -102,6 +105,17 @@ def sync():
                 if shipment_dt.date() < cfg.fbo_planned_from:
                     continue
 
+                # Проверка на наличие bundle_id
+                supply = (detail.get("supplies") or [None])[0]
+                if not supply:
+                    continue
+
+                bundle_id = supply.get("bundle_id")
+                if not bundle_id:
+                    print({"action": "skip_no_bundle_id", "order": order_number})
+                    continue  # Пропускаем поставку без bundle_id
+
+                # Получаем информацию о комплекте
                 bundle = oz.post(
                     "/v1/supply-order/bundle",
                     {"bundle_ids": [bundle_id], "limit": 100},
@@ -141,64 +155,6 @@ def sync():
                             "quantity": qty,
                             "price": ms.get_sale_price(product),
                         })
-                warehouse_name = supply["storage_warehouse"]["name"]
-
-                # получаем состав поставки
-                bundle = oz.post(
-                    "/v1/supply-order/bundle",
-                    {"bundle_ids": [bundle_id], "limit": 100},
-                )
-
-                positions = []
-                for item in (bundle.get("items") or []):
-                    article = str(item["offer_id"])
-                    qty = float(item["quantity"] or 0)
-                    if qty <= 0:
-                        continue
-
-                    product = ms.get("/entity/assortment", params={"filter": f"article={article}", "limit": 1})
-                    rows = product.get("rows") or []
-                    if not rows:
-                        continue
-
-                    ass = rows[0]
-                    ass_type = ass.get("meta", {}).get("type")
-
-                    if ass_type == "bundle":
-                        # Разворачиваем комплект на компоненты
-                        b_id = ass["id"]
-                        b = ms.get(f"/entity/bundle/{b_id}")
-                        comps = ((b.get("components") or {}).get("rows")) or []
-                        if not comps:
-                            print({"action": "skip_bundle_no_components", "article": article, "order": order_number})
-                            continue
-
-                        for c in comps:
-                            comp_ass = c["assortment"]
-                            comp_qty = float(c.get("quantity") or 0)
-                            if comp_qty <= 0:
-                                continue
-
-                            # берём цену продажи компонента
-                            comp_obj = ms.get(comp_ass["href"].replace(ms.base_url, ""))
-                            price = ms.get_sale_price(comp_obj)
-
-                            positions.append(
-                                {
-                                    "assortment": {"meta": comp_ass},
-                                    "quantity": qty * comp_qty,
-                                    "price": price,
-                                }
-                            )
-                    else:
-                        price = ms.get_sale_price(ass)
-                        positions.append(
-                            {
-                                "assortment": {"meta": ass["meta"]},
-                                "quantity": qty,
-                                "price": price,
-                            }
-                        )
 
                 if not positions:
                     continue
