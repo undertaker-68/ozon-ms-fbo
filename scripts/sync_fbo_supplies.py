@@ -138,17 +138,21 @@ def sync():
 
                     if ass_type == "bundle":
                         # Разворачиваем комплект на компоненты
-                        components = ms.get_bundle_components(product["id"])
-                        if not components:
-                            print({"action": "skip_bundle_no_components", "article": article, "order": order_number})
-                            continue
+                        try:
+                            components = ms.get_bundle_components(product["id"])
+                            if not components:
+                                print({"action": "skip_bundle_no_components", "article": article, "order": order_number})
+                                continue
 
-                        for component in components:
-                            positions.append({
-                                "assortment": {"meta": component["assortment"]},
-                                "quantity": qty * float(component["quantity"]),
-                                "price": ms.get_sale_price(component["assortment"]),
-                            })
+                            for component in components:
+                                positions.append({
+                                    "assortment": {"meta": component["assortment"]},
+                                    "quantity": qty * float(component["quantity"]),
+                                    "price": ms.get_sale_price(component["assortment"]),
+                                })
+                        except Exception as e:
+                            print({"action": "bundle_expansion_failed", "article": article, "error": str(e)})
+                            continue
                     else:
                         positions.append({
                             "assortment": {"meta": product["meta"]},
