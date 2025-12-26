@@ -102,12 +102,45 @@ def sync():
                 if shipment_dt.date() < cfg.fbo_planned_from:
                     continue
 
-                # bundle in ozon
-                supply = (detail.get("supplies") or [None])[0]
-                if not supply:
-                    continue
+                bundle = oz.post(
+                    "/v1/supply-order/bundle",
+                    {"bundle_ids": [bundle_id], "limit": 100},
+                )
 
-                bundle_id = supply["bundle_id"]
+                positions = []
+                for item in (bundle.get("items") or []):
+                    article = str(item["offer_id"])
+                    qty = float(item["quantity"])
+                    if qty <= 0:
+                        continue
+
+                    # Найдем товар в МС (product или variant)
+                    product = ms.find_assortment_by_article(article)
+                    if not product:
+                        print({"action": "skip_no_assortment", "article": article, "order": order_number})
+                        continue
+
+                    ass_type = product["meta"]["type"]
+
+                    if ass_type == "bundle":
+                        # Разворачиваем комплект на компоненты
+                        components = ms.get_bundle_components(product["id"])
+                        if not components:
+                            print({"action": "skip_bundle_no_components", "article": article, "order": order_number})
+                            continue
+
+                        for component in components:
+                            positions.append({
+                                "assortment": {"meta": component["assortment"]},
+                                "quantity": qty * float(component["quantity"]),
+                                "price": ms.get_sale_price(component["assortment"]),
+                            })
+                    else:
+                        positions.append({
+                            "assortment": {"meta": product["meta"]},
+                            "quantity": qty,
+                            "price": ms.get_sale_price(product),
+                        })
                 warehouse_name = supply["storage_warehouse"]["name"]
 
                 # получаем состав поставки
