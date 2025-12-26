@@ -128,7 +128,7 @@ def sync():
                     if qty <= 0:
                         continue
 
-                    # Найдем товар в МС (product или variant)
+                    # Найдем товар в МС (product или variant или bundle)
                     product = ms.find_assortment_by_article(article)
                     if not product:
                         print({"action": "skip_no_assortment", "article": article, "order": order_number})
