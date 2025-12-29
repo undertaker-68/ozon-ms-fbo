@@ -1,86 +1,53 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from app.http import HttpError
-
-MS_BASE = "https://api.moysklad.ru/api/remap/1.2"
-FBO_EXT_PREFIX = "OZON_FBO:"
+from .http import HttpError
+from .moysklad import MoySkladClient
 
 
-def fbo_external_code(order_number: str) -> str:
-    return f"{FBO_EXT_PREFIX}{order_number}"
-
-
-def _ms_ref(entity: str, id_: str) -> Dict[str, Any]:
-    return {
-        "meta": {
-            "href": f"{MS_BASE}/entity/{entity}/{id_}",
-            "type": entity,
-            "mediaType": "application/json",
-        }
-    }
-
-
-def _assortment_meta_from_order_pos(p: Dict[str, Any]) -> Dict[str, Any]:
-    ass = p.get("assortment") or {}
-    meta = ass.get("meta")
-    if meta:
-        return {"meta": meta}
-    # иногда уже может быть {"meta": {...}}
-    if "meta" in ass:
-        return {"meta": ass["meta"]}
-    return {"meta": {}}
-
-
-def find_moves_by_external(ms, external_code: str, limit: int = 100) -> List[dict]:
-    res = ms.get("/entity/move", params={"filter": f"externalCode={external_code}", "limit": limit})
+def _find_moves_by_external(ms: MoySkladClient, external: str) -> list[Dict[str, Any]]:
+    res = ms.get("/entity/move", params={"filter": f"externalCode={external}", "limit": 100})
     return res.get("rows") or []
 
 
-def _pick_latest(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    rows_sorted = sorted(rows, key=lambda r: (r.get("updated") or ""), reverse=True)
-    return rows_sorted[0]
-
-
-def dedup_moves_by_external(ms, external_code: str, dry_run: bool) -> Optional[dict]:
-    rows = find_moves_by_external(ms, external_code)
+def dedup_moves_by_external(ms: MoySkladClient, external: str, *, dry_run: bool) -> Optional[Dict[str, Any]]:
+    rows = _find_moves_by_external(ms, external)
     if not rows:
         return None
-    keep = _pick_latest(rows)
-    dups = [r for r in rows if r.get("id") and r["id"] != keep.get("id")]
+
+    rows_sorted = sorted(rows, key=lambda r: (r.get("moment") or "", r.get("created") or "", r.get("id") or ""))
+    keep = rows_sorted[0]
+    dups = rows_sorted[1:]
 
     for d in dups:
         if dry_run:
-            print({"action": "dry_run_delete_duplicate_move", "id": d["id"], "externalCode": external_code})
+            print({"action": "dry_run_delete_move_duplicate", "id": d["id"], "externalCode": external})
         else:
             ms.delete(f"/entity/move/{d['id']}")
-            print({"action": "deleted_duplicate_move", "id": d["id"], "externalCode": external_code})
+            print({"action": "deleted_move_duplicate", "id": d["id"], "externalCode": external})
 
     return keep
 
 
-def build_move_positions_from_order_positions(order_positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
+def build_move_positions_from_order_positions(order_positions: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    positions = []
     for p in order_positions:
-        qty = float(p.get("quantity") or 0)
-        if qty <= 0:
-            continue
-        price = p.get("price")
-        if price is None:
-            price = 0
-        out.append(
+        ass = p.get("assortment") or {}
+        # у нас в order_positions: {"assortment":{"meta":...}}
+        meta = ass.get("meta") if "meta" in ass else ass
+        positions.append(
             {
-                "assortment": _assortment_meta_from_order_pos(p),
-                "quantity": qty,
-                "price": int(price),  # важно: цена как в заказе
+                "assortment": {"meta": meta},
+                "quantity": float(p.get("quantity") or 0),
+                "price": int(p.get("price") or 0),
             }
         )
-    return out
+    return positions
 
 
 def create_move(
-    ms,
+    ms: MoySkladClient,
     *,
     name: str,
     external_code: str,
@@ -90,38 +57,33 @@ def create_move(
     target_store_id: str,
     description: str,
     customerorder_id: str,
-    positions: List[Dict[str, Any]],
+    positions: list[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {
+    payload = {
         "name": name,
         "externalCode": external_code,
-        "organization": _ms_ref("organization", organization_id),
-        "state": _ms_ref("state", state_id),
-        "sourceStore": _ms_ref("store", source_store_id),
-        "targetStore": _ms_ref("store", target_store_id),
+        "organization": ms.meta("organization", organization_id),
+        "state": ms.meta("state", state_id),
+        "sourceStore": ms.meta("store", source_store_id),
+        "targetStore": ms.meta("store", target_store_id),
         "description": description,
-        "customerOrder": _ms_ref("customerorder", customerorder_id),
+        "customerOrder": ms.meta("customerorder", customerorder_id),
         "positions": positions,
         "applicable": False,
     }
     return ms.post("/entity/move", payload)
 
 
-def update_move_positions_only(ms, move_id: str, positions: List[Dict[str, Any]]) -> Dict[str, Any]:
-    return ms.put(f"/entity/move/{move_id}", {"positions": positions})
+def update_move_positions_only(ms: MoySkladClient, move_id: str, positions: list[Dict[str, Any]]) -> None:
+    ms.put(f"/entity/move/{move_id}", {"positions": positions})
 
 
-def try_apply_move(ms, move_id: str) -> Dict[str, Any]:
+def try_apply_move(ms: MoySkladClient, move_id: str) -> Dict[str, Any]:
     try:
-        updated = ms.put(f"/entity/move/{move_id}", {"applicable": True})
-        return {"action": "move_applied", "id": move_id, "updated": updated}
+        ms.put(f"/entity/move/{move_id}", {"applicable": True})
+        return {"action": "move_applied", "id": move_id}
     except HttpError as e:
-        txt = str(e)
-        if "Нельзя переместить товар" in txt:
+        msg = str(e)
+        if "Нельзя переместить товар" in msg or "code\" : 3007" in msg:
             return {"action": "move_left_unapplied", "id": move_id, "reason": "not_enough_stock"}
-        raise
-
-
-def link_move_to_customerorder(ms, order_id: str, move_id: str) -> Dict[str, Any]:
-    # UI-связка может не отображаться как "documents", но поле связи в move/customerOrder — главное.
-    return {"action": "order_linked_to_move", "order_id": order_id, "move_id": move_id}
+        return {"action": "move_apply_failed", "id": move_id, "error": msg[:300]}
