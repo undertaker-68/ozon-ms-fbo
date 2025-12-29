@@ -13,14 +13,15 @@ class MoySkladClient:
 
     @property
     def headers(self) -> Dict[str, str]:
-        # У тебя уже работает Bearer в проекте — оставляем.
-        # Accept важен именно application/json;charset=utf-8.
+        # ВАЖНО: MoySklad принимает только этот Accept
         return {
             "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json",
             "Accept": "application/json;charset=utf-8",
+            "Content-Type": "application/json;charset=utf-8",
+            "User-Agent": "ozon-ms-fbo-integration/1.0",
         }
 
+    # ---------- low level ----------
     def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return request_json("GET", self.base_url + path, headers=self.headers, params=params)
 
@@ -33,37 +34,40 @@ class MoySkladClient:
     def delete(self, path: str) -> Dict[str, Any]:
         return request_json("DELETE", self.base_url + path, headers=self.headers)
 
-    # ---------- helpers for assortment / bundle ----------
-
     def get_by_href(self, href: str) -> Dict[str, Any]:
-        """
-        Прямой GET по href из meta (обычно полный URL).
-        Нужно, чтобы доставать salePrices у компонентного товара.
-        """
+        # href уже полный
         return request_json("GET", href, headers=self.headers)
 
-    def get_bundle_components(self, bundle_id: str):
-        """
-        ВАЖНО:
-        Компоненты комплекта лежат в:
-        /entity/bundle/{bundle_id}/components
-        """
-        res = self.get(f"/entity/bundle/{bundle_id}/components")
-        return res.get("rows", [])
+    # ---------- helpers ----------
+    def meta(self, entity: str, id_: str) -> Dict[str, Any]:
+        return {
+            "meta": {
+                "href": f"{self.base_url}/entity/{entity}/{id_}",
+                "type": entity,
+                "mediaType": "application/json",
+            }
+        }
 
-    def find_assortment_by_article(self, article: str):
+    def find_assortment_by_article(self, article: str) -> Optional[Dict[str, Any]]:
         res = self.get("/entity/assortment", params={"filter": f"article={article}", "limit": 1})
         rows = res.get("rows") or []
         return rows[0] if rows else None
 
-    def get_sale_price(self, product: Dict[str, Any]) -> int:
+    def get_bundle_components(self, bundle_id: str) -> list[Dict[str, Any]]:
         """
-        Берём базовую цену продажи (первую ненулевую) из salePrices.value.
-        Возвращаем int (как у МС) — обычно в копейках.
+        Компоненты комплекта:
+        GET /entity/bundle/{id}/components
         """
-        prices = product.get("salePrices") or []
+        res = self.get(f"/entity/bundle/{bundle_id}/components")
+        return res.get("rows") or []
+
+    def get_sale_price(self, obj: Dict[str, Any]) -> int:
+        """
+        Базовая цена продажи: salePrices[].value (первая ненулевая)
+        """
+        prices = obj.get("salePrices") or []
         for p in prices:
-            value = p.get("value")
-            if value:
-                return int(value)
+            v = p.get("value")
+            if v:
+                return int(v)
         return 0
