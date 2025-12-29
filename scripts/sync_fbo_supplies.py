@@ -66,9 +66,18 @@ SALES_CHANNEL_BY_CABINET = {
 
 
 def _parse_ozon_timeslot_from(detail: dict) -> datetime:
-    # from всегда в ISO, бывает Z
     ts = detail["timeslot"]["timeslot"]["from"]
     return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+
+def _ms_ref(ms: MoySkladClient, entity: str, id_: str) -> dict:
+    return {
+        "meta": {
+            "href": f"{ms.base_url}/entity/{entity}/{id_}",
+            "type": entity,
+            "mediaType": "application/json",
+        }
+    }
 
 
 def sync():
@@ -81,7 +90,7 @@ def sync():
 
         for state in SYNC_STATES:
             if state == CANCELLED:
-                continue  # отменённые не трогаем вообще
+                continue  # отменённые не трогаем
 
             resp = oz.post(
                 "/v3/supply-order/list",
@@ -99,13 +108,12 @@ def sync():
                     continue
 
                 detail = oz.get_supply_orders([order_id])["orders"][0]
-                order_number = str(detail["order_number"])  # имя всегда голое число
+                order_number = str(detail["order_number"])
 
                 shipment_dt = _parse_ozon_timeslot_from(detail)
                 if shipment_dt.date() < cfg.fbo_planned_from:
                     continue
 
-                # Проверка на наличие bundle_id
                 supply = (detail.get("supplies") or [None])[0]
                 if not supply:
                     continue
@@ -113,91 +121,103 @@ def sync():
                 bundle_id = supply.get("bundle_id")
                 if not bundle_id:
                     print({"action": "skip_no_bundle_id", "order": order_number})
-                    continue  # Пропускаем поставку без bundle_id
+                    continue
 
-                # Получаем информацию о комплекте
+                warehouse_name = (supply.get("storage_warehouse") or {}).get("name") or "Unknown Warehouse"
+
                 bundle = oz.post(
                     "/v1/supply-order/bundle",
                     {"bundle_ids": [bundle_id], "limit": 100},
                 )
 
+                # ---------- build order positions ----------
                 positions = []
+
                 for item in (bundle.get("items") or []):
-                    article = str(item["offer_id"])
-                    qty = float(item["quantity"])
-                    if qty <= 0:
+                    article = str(item.get("offer_id") or "")
+                    qty = float(item.get("quantity") or 0)
+                    if not article or qty <= 0:
                         continue
 
-                    # Найдем товар в МС (product или variant или bundle)
-                    product = ms.find_assortment_by_article(article)
-                    if not product:
+                    ass = ms.find_assortment_by_article(article)
+                    if not ass:
                         print({"action": "skip_no_assortment", "article": article, "order": order_number})
                         continue
 
-                    ass_type = product["meta"]["type"]
+                    ass_type = (ass.get("meta") or {}).get("type")
 
                     if ass_type == "bundle":
-                        # Разворачиваем комплект на компоненты
-                        try:
-                            components = ms.get_bundle_components(product["id"])
-                            if not components:
-                                print({"action": "skip_bundle_no_components", "article": article, "order": order_number})
+                        # ВАЖНО: компоненты берём из /entity/bundle/{id}/components
+                        components = ms.get_bundle_components(ass["id"])
+                        if not components:
+                            print({"action": "skip_bundle_no_components", "article": article, "order": order_number})
+                            continue
+
+                        for c in components:
+                            c_ass = c.get("assortment") or {}
+                            c_meta = c_ass.get("meta") or {}
+                            c_qty = float(c.get("quantity") or 0)
+                            if not c_meta or c_qty <= 0:
                                 continue
 
-                            for component in components:
-                                positions.append({
-                                    "assortment": {"meta": component["assortment"]},
-                                    "quantity": qty * float(component["quantity"]),
-                                    "price": ms.get_sale_price(component["assortment"]),
-                                })
-                        except Exception as e:
-                            print({"action": "bundle_expansion_failed", "article": article, "error": str(e)})
-                            continue
+                            # Чтобы взять цену продажи компонента — делаем GET по href
+                            comp_obj = ms.get_by_href(c_meta["href"])
+                            comp_price = ms.get_sale_price(comp_obj)
+
+                            positions.append(
+                                {
+                                    "assortment": {"meta": c_meta},
+                                    "quantity": qty * c_qty,
+                                    "price": comp_price,
+                                }
+                            )
                     else:
-                        positions.append({
-                            "assortment": {"meta": product["meta"]},
-                            "quantity": qty,
-                            "price": ms.get_sale_price(product),
-                        })
+                        positions.append(
+                            {
+                                "assortment": {"meta": ass["meta"]},
+                                "quantity": qty,
+                                "price": ms.get_sale_price(ass),
+                            }
+                        )
 
                 if not positions:
                     continue
+
+                description = f"{order_number} - {warehouse_name}"
 
                 # -------- CustomerOrder (key = externalCode) --------
                 order_payload = {
                     "name": order_number,
                     "externalCode": fbo_ext_order(order_number),
-                    "organization": {"meta": {"href": f"{ms.base_url}/entity/organization/{ORGANIZATION_ID}", "type": "organization", "mediaType": "application/json"}},
-                    "agent": {"meta": {"href": f"{ms.base_url}/entity/counterparty/{AGENT_ID}", "type": "counterparty", "mediaType": "application/json"}},
-                    "state": {"meta": {"href": f"{ms.base_url}/entity/state/{ORDER_STATE_ID}", "type": "state", "mediaType": "application/json"}},
-                    "salesChannel": {"meta": {"href": f"{ms.base_url}/entity/saleschannel/{sales_channel}", "type": "saleschannel", "mediaType": "application/json"}},
-                    "description": f"{order_number} - {supply.get('storage_warehouse', {}).get('name', 'Unknown Warehouse')}",
+                    "organization": _ms_ref(ms, "organization", ORGANIZATION_ID),
+                    "agent": _ms_ref(ms, "counterparty", AGENT_ID),
+                    "state": _ms_ref(ms, "state", ORDER_STATE_ID),
+                    "salesChannel": _ms_ref(ms, "saleschannel", sales_channel),
+                    "description": description,
                     "positions": positions,
                     "deliveryPlannedMoment": shipment_dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
-                    "store": {"meta": {"href": f"{ms.base_url}/entity/store/{STORE_ID}", "type": "store", "mediaType": "application/json"}},
+                    "store": _ms_ref(ms, "store", STORE_ID),
                 }
 
                 result = ensure_customerorder(ms, order_payload, dry_run=cfg.fbo_dry_run)
                 print(result)
 
-                # Получим актуальный заказ (по externalCode) — для id
-                # (в dry-run id может не быть, но для backfill в реале будет)
-                order_rows = ms.get("/entity/customerorder", params={"filter": f"externalCode={fbo_ext_order(order_number)}", "limit": 1}).get("rows") or []
+                # получаем id заказа (для move/demand)
+                order_rows = ms.get(
+                    "/entity/customerorder",
+                    params={"filter": f"externalCode={fbo_ext_order(order_number)}", "limit": 1},
+                ).get("rows") or []
                 if not order_rows:
-                    # dry-run — дальше смысла нет
                     continue
-                order_obj = order_rows[0]
-                order_id_ms = order_obj["id"]
+                order_id_ms = order_rows[0]["id"]
 
-                # -------- Demand exists? -> НЕ обновляем дальше (как правило) --------
+                # -------- если уже есть demand — дальше не обновляем --------
                 demand_existing = dedup_demands_by_external(ms, fbo_ext_order(order_number), dry_run=cfg.fbo_dry_run)
-
                 if demand_existing:
-                    # если уже есть отгрузка — не трогаем ни заказ, ни move/demand
                     print({"action": "skip_has_demand", "name": order_number, "demand_id": demand_existing["id"]})
                     continue
 
-                # -------- Move (always, 1:1) --------
+                # -------- Move (1:1) --------
                 move_existing = dedup_moves_by_external(ms, fbo_ext_order(order_number), dry_run=cfg.fbo_dry_run)
                 move_positions = build_move_positions_from_order_positions(order_payload["positions"])
 
@@ -214,7 +234,7 @@ def sync():
                             state_id=MOVE_STATE_ID,
                             source_store_id=MOVE_SOURCE_STORE_ID,
                             target_store_id=MOVE_TARGET_STORE_ID,
-                            description=order_payload["description"],
+                            description=description,
                             customerorder_id=order_id_ms,
                             positions=move_positions,
                         )
@@ -229,11 +249,10 @@ def sync():
                         print({"action": "move_updated", "id": move_existing["id"], "name": order_number})
                         move_obj = move_existing
 
-                # пробуем провести move
                 if (not cfg.fbo_dry_run) and move_obj and move_obj.get("id"):
                     print(try_apply_move(ms, move_obj["id"]))
 
-                # -------- Demand (only for specific ozon states) --------
+                # -------- Demand (для нужных статусов) --------
                 if state not in DEMAND_OZON_STATES:
                     continue
 
@@ -251,7 +270,7 @@ def sync():
                     agent_id=AGENT_ID,
                     state_id=DEMAND_STATE_ID,
                     store_id=STORE_ID,
-                    description=order_payload["description"],
+                    description=description,
                     customerorder_id=order_id_ms,
                     positions=demand_positions,
                 )
