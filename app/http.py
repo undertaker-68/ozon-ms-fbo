@@ -18,16 +18,16 @@ def request_json(
     headers: Optional[Dict[str, str]] = None,
     params: Optional[Dict[str, Any]] = None,
     json_body: Optional[Dict[str, Any]] = None,
-    timeout: int = 60,
+    timeout: int = 30,
+    retries: int = 8,
 ) -> Dict[str, Any]:
-    # Ретраи для rate limit (МойСклад 429) и временных сетевых ошибок
-    backoffs = [0.5, 1, 2, 4, 8]
+    """
+    Универсальный запрос с ретраями.
+    ВАЖНО: для MoySklad часто ловим 429 — делаем backoff.
+    """
+    last_exc: Optional[BaseException] = None
 
-    last_exc: Exception | None = None
-    for attempt, sleep_s in enumerate([0.0] + backoffs):
-        if sleep_s:
-            time.sleep(sleep_s)
-
+    for attempt in range(1, retries + 1):
         try:
             resp = requests.request(
                 method=method,
@@ -35,20 +35,20 @@ def request_json(
                 headers=headers,
                 params=params,
                 json=json_body,
-                timeout=(10, timeout),
+                timeout=timeout,
             )
-        except requests.Timeout as e:
-            last_exc = HttpError(f"TIMEOUT {method} {url}")
-            continue
-        except requests.RequestException as e:
+        except Exception as e:
             last_exc = e
+            time.sleep(min(2 ** attempt, 20))
             continue
 
         text = resp.text or ""
 
-        # retry на rate-limit
-        if resp.status_code == 429:
-            last_exc = HttpError(f"429 {url} -> {text[:300]}")
+        # Ретраи на лимит/временные
+        if resp.status_code in (429, 500, 502, 503, 504):
+            # мягкий backoff
+            sleep_s = min(2 ** attempt, 25)
+            time.sleep(sleep_s)
             continue
 
         if resp.status_code >= 400:
