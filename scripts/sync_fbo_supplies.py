@@ -4,7 +4,7 @@ from app.config import load_config
 from app.ozon_fbo import OzonFboClient
 from app.moysklad import MoySkladClient
 
-from app.ms_customerorder import ensure_customerorder, fbo_external_code as fbo_ext_order
+from app.ms_customerorder import ensure_customerorder, fbo_external_code as fbo_ext
 from app.ms_move import (
     dedup_moves_by_external,
     create_move,
@@ -27,7 +27,7 @@ ACCEPTED_AT_SUPPLY_WAREHOUSE = 3
 IN_TRANSIT = 4
 ACCEPTANCE_AT_STORAGE_WAREHOUSE = 5
 COMPLETED = 8
-CANCELLED = 10
+CANCELLED = 10  # не трогаем
 
 SYNC_STATES = (
     READY_TO_SUPPLY,
@@ -59,11 +59,6 @@ MOVE_TARGET_STORE_ID = STORE_ID
 
 DEMAND_STATE_ID = "b543e330-44e4-11f0-0a80-0da5002260ab"
 
-SALES_CHANNEL_BY_CABINET = {
-    0: "fede2826-9fd0-11ee-0a80-0641000f3d25",
-    1: "ff2827b8-9fd0-11ee-0a80-0641000f3d31",
-}
-
 
 def _parse_ozon_timeslot_from(detail: dict) -> datetime:
     ts = detail["timeslot"]["timeslot"]["from"]
@@ -84,34 +79,29 @@ def sync():
     cfg = load_config()
     ms = MoySkladClient(cfg.moysklad_token)
 
+    planned_from = cfg.fbo_planned_from  # date | None
+    exclude_ids = cfg.fbo_exclude_order_ids or set()
+
     for cab_index, cab in enumerate(cfg.cabinets):
         oz = OzonFboClient(cab.client_id, cab.api_key)
-        sales_channel = SALES_CHANNEL_BY_CABINET[cab_index]
+        sales_channel = cab.ms_saleschannel_id
 
         for state in SYNC_STATES:
             if state == CANCELLED:
                 continue  # отменённые не трогаем
 
-            resp = oz.post(
-                "/v3/supply-order/list",
-                {
-                    "filter": {"states": [state], "from_supply_order_id": 0},
-                    "limit": 100,
-                    "sort_by": 1,
-                    "sort_dir": "DESC",
-                },
-            )
-
-            for order_id in resp.get("order_ids", []):
-                if order_id in cfg.fbo_exclude_order_ids:
+            # ---------- ПАГИНАЦИЯ: берём ВСЕ order_ids ----------
+            for order_id in oz.iter_supply_order_ids(state=state, limit=100, sort_by=1, sort_dir="DESC"):
+                if order_id in exclude_ids:
                     print({"action": "skip_excluded_order", "order_id": order_id})
                     continue
 
                 detail = oz.get_supply_orders([order_id])["orders"][0]
                 order_number = str(detail["order_number"])
+                ext = fbo_ext(order_number)
 
                 shipment_dt = _parse_ozon_timeslot_from(detail)
-                if shipment_dt.date() < cfg.fbo_planned_from:
+                if planned_from and shipment_dt.date() < planned_from:
                     continue
 
                 supply = (detail.get("supplies") or [None])[0]
@@ -124,15 +114,21 @@ def sync():
                     continue
 
                 warehouse_name = (supply.get("storage_warehouse") or {}).get("name") or "Unknown Warehouse"
+                description = f"{order_number} - {warehouse_name}"
 
+                # ====== (4) Если уже есть Demand — вообще ничего не обновляем ======
+                demand_existing = dedup_demands_by_external(ms, ext, dry_run=cfg.fbo_dry_run)
+                if demand_existing:
+                    print({"action": "skip_has_demand", "name": order_number, "demand_id": demand_existing["id"]})
+                    continue
+
+                # ---------- позиции из Ozon bundle ----------
                 bundle = oz.post(
                     "/v1/supply-order/bundle",
                     {"bundle_ids": [bundle_id], "limit": 100},
                 )
 
-                # ---------- build order positions ----------
                 positions = []
-
                 for item in (bundle.get("items") or []):
                     article = str(item.get("offer_id") or "")
                     qty = float(item.get("quantity") or 0)
@@ -147,7 +143,7 @@ def sync():
                     ass_type = (ass.get("meta") or {}).get("type")
 
                     if ass_type == "bundle":
-                        # ВАЖНО: компоненты берём из /entity/bundle/{id}/components
+                        # компоненты комплекта берём так:
                         components = ms.get_bundle_components(ass["id"])
                         if not components:
                             print({"action": "skip_bundle_no_components", "article": article, "order": order_number})
@@ -160,7 +156,6 @@ def sync():
                             if not c_meta or c_qty <= 0:
                                 continue
 
-                            # Чтобы взять цену продажи компонента — делаем GET по href
                             comp_obj = ms.get_by_href(c_meta["href"])
                             comp_price = ms.get_sale_price(comp_obj)
 
@@ -183,12 +178,10 @@ def sync():
                 if not positions:
                     continue
 
-                description = f"{order_number} - {warehouse_name}"
-
-                # -------- CustomerOrder (key = externalCode) --------
+                # -------- CustomerOrder (key=externalCode) --------
                 order_payload = {
                     "name": order_number,
-                    "externalCode": fbo_ext_order(order_number),
+                    "externalCode": ext,
                     "organization": _ms_ref(ms, "organization", ORGANIZATION_ID),
                     "agent": _ms_ref(ms, "counterparty", AGENT_ID),
                     "state": _ms_ref(ms, "state", ORDER_STATE_ID),
@@ -202,23 +195,18 @@ def sync():
                 result = ensure_customerorder(ms, order_payload, dry_run=cfg.fbo_dry_run)
                 print(result)
 
-                # получаем id заказа (для move/demand)
+                # получаем id заказа по externalCode (чтобы связать move/demand)
                 order_rows = ms.get(
                     "/entity/customerorder",
-                    params={"filter": f"externalCode={fbo_ext_order(order_number)}", "limit": 1},
+                    params={"filter": f"externalCode={ext}", "limit": 1},
                 ).get("rows") or []
+
                 if not order_rows:
                     continue
                 order_id_ms = order_rows[0]["id"]
 
-                # -------- если уже есть demand — дальше не обновляем --------
-                demand_existing = dedup_demands_by_external(ms, fbo_ext_order(order_number), dry_run=cfg.fbo_dry_run)
-                if demand_existing:
-                    print({"action": "skip_has_demand", "name": order_number, "demand_id": demand_existing["id"]})
-                    continue
-
-                # -------- Move (1:1) --------
-                move_existing = dedup_moves_by_external(ms, fbo_ext_order(order_number), dry_run=cfg.fbo_dry_run)
+                # -------- Move (1:1, key=externalCode) --------
+                move_existing = dedup_moves_by_external(ms, ext, dry_run=cfg.fbo_dry_run)
                 move_positions = build_move_positions_from_order_positions(order_payload["positions"])
 
                 if not move_existing:
@@ -229,7 +217,7 @@ def sync():
                         mv = create_move(
                             ms,
                             name=order_number,
-                            external_code=fbo_ext_order(order_number),
+                            external_code=ext,
                             organization_id=ORGANIZATION_ID,
                             state_id=MOVE_STATE_ID,
                             source_store_id=MOVE_SOURCE_STORE_ID,
@@ -252,7 +240,7 @@ def sync():
                 if (not cfg.fbo_dry_run) and move_obj and move_obj.get("id"):
                     print(try_apply_move(ms, move_obj["id"]))
 
-                # -------- Demand (для нужных статусов) --------
+                # -------- Demand (1:1, только для нужных статусов) --------
                 if state not in DEMAND_OZON_STATES:
                     continue
 
@@ -265,7 +253,7 @@ def sync():
                 dm = create_demand(
                     ms,
                     name=order_number,
-                    external_code=fbo_ext_order(order_number),
+                    external_code=ext,
                     organization_id=ORGANIZATION_ID,
                     agent_id=AGENT_ID,
                     state_id=DEMAND_STATE_ID,
