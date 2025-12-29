@@ -1,68 +1,52 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from app.http import HttpError
-
-MS_BASE = "https://api.moysklad.ru/api/remap/1.2"
-FBO_EXT_PREFIX = "OZON_FBO:"
+from .http import HttpError
+from .moysklad import MoySkladClient
 
 
-def fbo_external_code(order_number: str) -> str:
-    return f"{FBO_EXT_PREFIX}{order_number}"
-
-
-def _ms_ref(entity: str, id_: str) -> Dict[str, Any]:
-    return {
-        "meta": {
-            "href": f"{MS_BASE}/entity/{entity}/{id_}",
-            "type": entity,
-            "mediaType": "application/json",
-        }
-    }
-
-
-def find_demands_by_external(ms, external_code: str, limit: int = 100) -> List[dict]:
-    res = ms.get("/entity/demand", params={"filter": f"externalCode={external_code}", "limit": limit})
+def _find_demands_by_external(ms: MoySkladClient, external: str) -> list[Dict[str, Any]]:
+    res = ms.get("/entity/demand", params={"filter": f"externalCode={external}", "limit": 100})
     return res.get("rows") or []
 
 
-def _pick_latest(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    rows_sorted = sorted(rows, key=lambda r: (r.get("updated") or ""), reverse=True)
-    return rows_sorted[0]
-
-
-def dedup_demands_by_external(ms, external_code: str, dry_run: bool) -> Optional[dict]:
-    rows = find_demands_by_external(ms, external_code)
+def dedup_demands_by_external(ms: MoySkladClient, external: str, *, dry_run: bool) -> Optional[Dict[str, Any]]:
+    rows = _find_demands_by_external(ms, external)
     if not rows:
         return None
-    keep = _pick_latest(rows)
-    dups = [r for r in rows if r.get("id") and r["id"] != keep.get("id")]
+
+    rows_sorted = sorted(rows, key=lambda r: (r.get("moment") or "", r.get("created") or "", r.get("id") or ""))
+    keep = rows_sorted[0]
+    dups = rows_sorted[1:]
 
     for d in dups:
         if dry_run:
-            print({"action": "dry_run_delete_duplicate_demand", "id": d["id"], "externalCode": external_code})
+            print({"action": "dry_run_delete_demand_duplicate", "id": d["id"], "externalCode": external})
         else:
             ms.delete(f"/entity/demand/{d['id']}")
-            print({"action": "deleted_duplicate_demand", "id": d["id"], "externalCode": external_code})
+            print({"action": "deleted_demand_duplicate", "id": d["id"], "externalCode": external})
 
     return keep
 
 
-def build_demand_positions_from_order_positions(order_positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
+def build_demand_positions_from_order_positions(order_positions: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    positions = []
     for p in order_positions:
-        qty = float(p.get("quantity") or 0)
-        if qty <= 0:
-            continue
         ass = p.get("assortment") or {}
-        meta = ass.get("meta") or ass.get("meta", {})
-        out.append({"assortment": {"meta": meta}, "quantity": qty, "price": int(p.get("price") or 0)})
-    return out
+        meta = ass.get("meta") if "meta" in ass else ass
+        positions.append(
+            {
+                "assortment": {"meta": meta},
+                "quantity": float(p.get("quantity") or 0),
+                "price": int(p.get("price") or 0),
+            }
+        )
+    return positions
 
 
 def create_demand(
-    ms,
+    ms: MoySkladClient,
     *,
     name: str,
     external_code: str,
@@ -72,26 +56,26 @@ def create_demand(
     store_id: str,
     description: str,
     customerorder_id: str,
-    positions: List[Dict[str, Any]],
+    positions: list[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {
+    payload = {
         "name": name,
         "externalCode": external_code,
-        "organization": _ms_ref("organization", organization_id),
-        "agent": _ms_ref("counterparty", agent_id),
-        "state": _ms_ref("state", state_id),
-        "store": _ms_ref("store", store_id),
+        "organization": ms.meta("organization", organization_id),
+        "agent": ms.meta("counterparty", agent_id),
+        "state": ms.meta("state", state_id),
+        "store": ms.meta("store", store_id),
         "description": description,
-        "customerOrder": _ms_ref("customerorder", customerorder_id),
+        "customerOrder": ms.meta("customerorder", customerorder_id),
         "positions": positions,
         "applicable": False,
     }
     return ms.post("/entity/demand", payload)
 
 
-def try_apply_demand(ms, demand_id: str) -> Dict[str, Any]:
+def try_apply_demand(ms: MoySkladClient, demand_id: str) -> Dict[str, Any]:
     try:
-        updated = ms.put(f"/entity/demand/{demand_id}", {"applicable": True})
-        return {"action": "demand_applied", "id": demand_id, "updated": updated}
+        ms.put(f"/entity/demand/{demand_id}", {"applicable": True})
+        return {"action": "demand_applied", "id": demand_id}
     except HttpError as e:
-        return {"action": "demand_left_unapplied", "id": demand_id, "error": str(e)}
+        return {"action": "demand_apply_failed", "id": demand_id, "error": str(e)[:300]}
