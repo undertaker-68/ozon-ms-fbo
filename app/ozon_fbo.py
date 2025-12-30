@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List
 
-from .http import request_json
+from .http import request_json, HttpError
 
 
 @dataclass(frozen=True)
@@ -37,18 +37,33 @@ class OzonFboClient:
         limit: int = 100,
         from_supply_order_id: str | int = 0,
     ) -> Dict[str, Any]:
-        # ВАЖНО: НЕ передаем sort_by=None / sort_dir=None вообще.
-        # Используем “железобетонно рабочий” вариант, который у тебя руками проходит.
-        payload = {
-            "filter": {
-                "states": [state],
-                "from_supply_order_id": from_supply_order_id,
-            },
-            "limit": limit,
-            "sort_by": 1,      # так у тебя проходит (а 0 — падает)
-            "sort_dir": "ASC",
-        }
-        return self.post("/v3/supply-order/list", payload)
+        """
+        ВАЖНО:
+        - sort_by=0 в Ozon не проходит (у тебя это подтверждено)
+        - для archive states Ozon НЕ принимает sort_dir=ASC и отвечает:
+          "Ascending sort direction is not supported for archive order states."
+        Поэтому: пробуем ASC, если получаем эту ошибку — повторяем с DESC.
+        """
+        def _payload(sort_dir: str) -> Dict[str, Any]:
+            return {
+                "filter": {
+                    "states": [state],
+                    "from_supply_order_id": from_supply_order_id,
+                },
+                "limit": limit,
+                "sort_by": 1,
+                "sort_dir": sort_dir,
+            }
+
+        # 1) пробуем ASC
+        try:
+            return self.post("/v3/supply-order/list", _payload("ASC"))
+        except HttpError as e:
+            msg = str(e)
+            if "Ascending sort direction is not supported for archive order states" in msg:
+                # 2) archive states -> пробуем DESC
+                return self.post("/v3/supply-order/list", _payload("DESC"))
+            raise
 
     def iter_supply_order_ids(self, state: int, limit: int = 100) -> Iterator[int]:
         last: str | int = 0
