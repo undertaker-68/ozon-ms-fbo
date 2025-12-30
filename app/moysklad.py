@@ -1,3 +1,6 @@
+cd /root/ozon_ms_fbo_integration
+
+cat > app/moysklad.py <<'PY'
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -13,9 +16,6 @@ class MoySkladClient:
 
     @property
     def auth_headers(self) -> Dict[str, str]:
-        # ВАЖНО:
-        # - Accept строго application/json;charset=utf-8 (МС ругался у тебя ранее).
-        # - Content-Type НЕ шлём глобально, иначе GET может ловить 415.
         return {
             "Authorization": f"Bearer {self.token}",
             "Accept": "application/json;charset=utf-8",
@@ -40,6 +40,19 @@ class MoySkladClient:
 
     # -------- helpers --------
 
+    def meta(self, entity: str, entity_id: str) -> Dict[str, Any]:
+        """
+        Удобный builder для meta-ссылок МС.
+        Пример: ms.meta("organization", "uuid") -> {"meta": {...}}
+        """
+        return {
+            "meta": {
+                "href": f"{self.base_url}/entity/{entity}/{entity_id}",
+                "type": entity,
+                "mediaType": "application/json",
+            }
+        }
+
     def get_by_href(self, href: str) -> Dict[str, Any]:
         return request_json("GET", href, headers=self.auth_headers)
 
@@ -50,13 +63,13 @@ class MoySkladClient:
         return res.get("rows") or []
 
     def find_assortment_by_article(self, article: str) -> Optional[Dict[str, Any]]:
-        # 1) Прямой фильтр по article (твой кейс)
+        # 1) Прямой фильтр по article
         res = self.get("/entity/assortment", params={"filter": f"article={article}", "limit": 1})
         rows = res.get("rows") or []
         if rows:
             return rows[0]
 
-        # 2) Железобетонный fallback: search (иногда артикул лежит в code)
+        # 2) Fallback search (если артикул лежит в code)
         res = self.get("/entity/assortment", params={"search": article, "limit": 50})
         rows = res.get("rows") or []
         for r in rows:
@@ -65,10 +78,11 @@ class MoySkladClient:
         return None
 
     def get_sale_price(self, product: Dict[str, Any]) -> int:
-        # Базовая цена продажи: первая ненулевая из salePrices.value
+        # Берём первую ненулевую цену продажи
         prices = product.get("salePrices") or []
         for p in prices:
             v = p.get("value")
             if v:
                 return int(v)
         return 0
+PY
