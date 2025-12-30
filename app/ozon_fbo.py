@@ -24,8 +24,6 @@ class OzonFboClient:
     def post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         return request_json("POST", self.base_url + path, headers=self.headers, json_body=payload)
 
-    # ---------- supply orders ----------
-
     def list_supply_order_ids(
         self,
         *,
@@ -36,32 +34,27 @@ class OzonFboClient:
         sort_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        ВАЖНО:
-        - НЕЛЬЗЯ отправлять sort_by=0 (Ozon 400).
-        - Если sort_by/sort_dir не заданы — НЕ отправляем их вообще.
+        ВАЖНО (по факту ответа API):
+        - sort_by ОБЯЗАТЕЛЕН и НЕ может быть 0
+        - поэтому используем дефолт sort_by=1, sort_dir=ASC
         """
+        sb = 1 if sort_by is None else int(sort_by)
+        if sb == 0:
+            sb = 1  # 0 запрещён
+
+        sd = "ASC" if sort_dir is None else str(sort_dir).upper()
+        if sd not in ("ASC", "DESC"):
+            sd = "ASC"
+
         payload: Dict[str, Any] = {
             "filter": {
                 "states": [int(state)],
                 "from_supply_order_id": int(from_supply_order_id),
             },
             "limit": int(limit),
+            "sort_by": sb,
+            "sort_dir": sd,
         }
-
-        # добавляем сортировку только если она явно задана
-        if sort_by is not None:
-            sb = int(sort_by)
-            if sb == 0:
-                # 0 запрещён Ozon-ом -> лучше вообще не слать
-                pass
-            else:
-                payload["sort_by"] = sb
-
-        if sort_dir is not None:
-            sd = str(sort_dir).upper()
-            if sd in ("ASC", "DESC"):
-                payload["sort_dir"] = sd
-
         return self.post("/v3/supply-order/list", payload)
 
     def get_supply_orders(self, order_ids: list[int]) -> Dict[str, Any]:
@@ -76,9 +69,6 @@ class OzonFboClient:
         sort_dir: Optional[str] = None,
         sleep_sec: float = 0.05,
     ) -> Iterator[int]:
-        """
-        Итератор по order_id с пагинацией через from_supply_order_id.
-        """
         last = 0
         while True:
             data = self.list_supply_order_ids(
@@ -93,12 +83,11 @@ class OzonFboClient:
             for oid in ids:
                 yield int(oid)
 
-            # если пусто — закончили
             if not ids:
                 break
 
-            # Ozon ожидает “следующую страницу” от last_id / from_supply_order_id
-            last = int(data.get("last_id") or ids[-1])
+            last_id = data.get("last_id")
+            last = int(last_id) if last_id else int(ids[-1])
 
             if not data.get("has_next"):
                 break
