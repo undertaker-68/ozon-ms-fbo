@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from .http import request_json
 
@@ -15,8 +15,8 @@ class OzonFboClient:
     @property
     def headers(self) -> Dict[str, str]:
         return {
-            "Client-Id": self.client_id,
-            "Api-Key": self.api_key,
+            "Client-Id": str(self.client_id),
+            "Api-Key": str(self.api_key),
             "Content-Type": "application/json",
         }
 
@@ -33,30 +33,41 @@ class OzonFboClient:
     # /v3/supply-order/list
     #
     # ВАЖНО:
-    #  - НЕ передаём sort_by/sort_dir вообще (из-за 400: SortBy must not be [0])
-    #  - пагинация через last_id (from_supply_order_id)
+    # Ozon валится, если sort_by отсутствует -> он превращается в 0 (невалидно).
+    # Поэтому ЖЁСТКО передаём sort_by=1 и sort_dir="DESC".
     # ---------------------------------------------------------
     def list_supply_order_ids(
         self,
         state: int,
         limit: int = 100,
-        last_id: str | int = 0,
+        last_id: Union[str, int] = 0,
+        sort_by: int = 1,
+        sort_dir: str = "DESC",
     ) -> Dict[str, Any]:
-        payload = {
+        payload: Dict[str, Any] = {
             "filter": {
-                "states": [state],
+                "states": [int(state)],
                 "from_supply_order_id": last_id,
             },
-            "limit": limit,
+            "limit": int(limit),
+            "sort_by": int(sort_by),
+            "sort_dir": str(sort_dir),
         }
         return self.post("/v3/supply-order/list", payload)
 
-    def iter_supply_order_ids(self, state: int, limit: int = 100) -> Any:
-        last_id: str | int = 0
+    def iter_supply_order_ids(self, state: int, limit: int = 100):
+        last_id: Union[str, int] = 0
         seen = set()
 
         while True:
-            data = self.list_supply_order_ids(state=state, limit=limit, last_id=last_id)
+            data = self.list_supply_order_ids(
+                state=state,
+                limit=limit,
+                last_id=last_id,
+                sort_by=1,
+                sort_dir="DESC",
+            )
+
             ids = data.get("order_ids") or []
             for oid in ids:
                 if oid in seen:
@@ -68,7 +79,7 @@ class OzonFboClient:
             if not new_last:
                 break
 
-            # Если сервер вдруг возвращает тот же last_id — выходим, чтобы не зависать.
+            # защита от зацикливания
             if new_last == last_id:
                 break
 
@@ -77,8 +88,5 @@ class OzonFboClient:
     def get_supply_orders(self, order_ids: List[int]) -> Dict[str, Any]:
         return self.post("/v3/supply-order/get", {"order_ids": order_ids})
 
-    # ---------------------------------------------------------
-    # /v1/supply-order/bundle
-    # ---------------------------------------------------------
     def get_bundle_items(self, bundle_ids: List[str], limit: int = 100) -> Dict[str, Any]:
-        return self.post("/v1/supply-order/bundle", {"bundle_ids": bundle_ids, "limit": limit})
+        return self.post("/v1/supply-order/bundle", {"bundle_ids": bundle_ids, "limit": int(limit)})
