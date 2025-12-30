@@ -1,81 +1,81 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from .http import HttpError
-from .moysklad import MoySkladClient
+from .http import request_json
 
 
-def _find_demands_by_external(ms: MoySkladClient, external: str) -> list[Dict[str, Any]]:
-    res = ms.get("/entity/demand", params={"filter": f"externalCode={external}", "limit": 100})
-    return res.get("rows") or []
+@dataclass(frozen=True)
+class MoySkladClient:
+    token: str
+    base_url: str = "https://api.moysklad.ru/api/remap/1.2"
 
+    @property
+    def auth_headers(self) -> Dict[str, str]:
+        # ВАЖНО: Accept именно application/json;charset=utf-8 (иначе 400 у МС)
+        return {
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/json;charset=utf-8",
+        }
 
-def dedup_demands_by_external(ms: MoySkladClient, external: str, *, dry_run: bool) -> Optional[Dict[str, Any]]:
-    rows = _find_demands_by_external(ms, external)
-    if not rows:
+    def _headers_for_json(self) -> Dict[str, str]:
+        h = dict(self.auth_headers)
+        h["Content-Type"] = "application/json;charset=utf-8"
+        return h
+
+    def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return request_json("GET", self.base_url + path, headers=self.auth_headers, params=params)
+
+    def post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return request_json("POST", self.base_url + path, headers=self._headers_for_json(), json_body=payload)
+
+    def put(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return request_json("PUT", self.base_url + path, headers=self._headers_for_json(), json_body=payload)
+
+    def delete(self, path: str) -> Dict[str, Any]:
+        return request_json("DELETE", self.base_url + path, headers=self.auth_headers)
+
+    # -------- helpers --------
+
+    def meta(self, entity: str, entity_id: str) -> Dict[str, Any]:
+        return {
+            "meta": {
+                "href": f"{self.base_url}/entity/{entity}/{entity_id}",
+                "type": entity,
+                "mediaType": "application/json",
+            }
+        }
+
+    def get_by_href(self, href: str) -> Dict[str, Any]:
+        return request_json("GET", href, headers=self.auth_headers)
+
+    def get_bundle_components(self, bundle_id: str) -> list[Dict[str, Any]]:
+        # правильный путь:
+        # /entity/bundle/{bundle_id}/components
+        res = self.get(f"/entity/bundle/{bundle_id}/components")
+        return res.get("rows") or []
+
+    def find_assortment_by_article(self, article: str) -> Optional[Dict[str, Any]]:
+        # 1) Прямой фильтр по article
+        res = self.get("/entity/assortment", params={"filter": f"article={article}", "limit": 1})
+        rows = res.get("rows") or []
+        if rows:
+            return rows[0]
+
+        # 2) Fallback search (если артикул лежит в code)
+        res = self.get("/entity/assortment", params={"search": article, "limit": 50})
+        rows = res.get("rows") or []
+        for r in rows:
+            if r.get("article") == article or r.get("code") == article:
+                return r
         return None
 
-    rows_sorted = sorted(rows, key=lambda r: (r.get("moment") or "", r.get("created") or "", r.get("id") or ""))
-    keep = rows_sorted[0]
-    dups = rows_sorted[1:]
-
-    for d in dups:
-        if dry_run:
-            print({"action": "dry_run_delete_demand_duplicate", "id": d["id"], "externalCode": external})
-        else:
-            ms.delete(f"/entity/demand/{d['id']}")
-            print({"action": "deleted_demand_duplicate", "id": d["id"], "externalCode": external})
-
-    return keep
-
-
-def build_demand_positions_from_order_positions(order_positions: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
-    positions = []
-    for p in order_positions:
-        ass = p.get("assortment") or {}
-        meta = ass.get("meta") if "meta" in ass else ass
-        positions.append(
-            {
-                "assortment": {"meta": meta},
-                "quantity": float(p.get("quantity") or 0),
-                "price": int(p.get("price") or 0),
-            }
-        )
-    return positions
-
-
-def create_demand(
-    ms: MoySkladClient,
-    *,
-    name: str,
-    external_code: str,
-    organization_id: str,
-    agent_id: str,
-    state_id: str,
-    store_id: str,
-    description: str,
-    customerorder_id: str,
-    positions: list[Dict[str, Any]],
-) -> Dict[str, Any]:
-    payload = {
-        "name": name,
-        "externalCode": external_code,
-        "organization": ms.meta("organization", organization_id),
-        "agent": ms.meta("counterparty", agent_id),
-        "state": ms.meta("state", state_id),
-        "store": ms.meta("store", store_id),
-        "description": description,
-        "customerOrder": ms.meta("customerorder", customerorder_id),
-        "positions": positions,
-        "applicable": False,
-    }
-    return ms.post("/entity/demand", payload)
-
-
-def try_apply_demand(ms: MoySkladClient, demand_id: str) -> Dict[str, Any]:
-    try:
-        ms.put(f"/entity/demand/{demand_id}", {"applicable": True})
-        return {"action": "demand_applied", "id": demand_id}
-    except HttpError as e:
-        return {"action": "demand_apply_failed", "id": demand_id, "error": str(e)[:300]}
+    def get_sale_price(self, product_or_bundle: Dict[str, Any]) -> int:
+        # Берём первую ненулевую цену продажи
+        prices = product_or_bundle.get("salePrices") or []
+        for p in prices:
+            v = p.get("value")
+            if v:
+                return int(v)
+        return 0
