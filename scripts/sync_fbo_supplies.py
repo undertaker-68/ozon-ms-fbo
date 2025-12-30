@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Dict, List, Tuple
 
 from app.config import load_config
 from app.ozon_fbo import OzonFboClient
@@ -63,12 +64,118 @@ def parse_ozon_timeslot_from(detail: dict) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
+def ms_price_for_assortment(ms: MoySkladClient, ass: dict) -> int:
+    """
+    Берём salePrice по объекту ассортимента.
+    Если это short объект (без salePrices) — догружаем по href.
+    """
+    if (ass.get("salePrices") or []) and any((p.get("value") or 0) for p in (ass.get("salePrices") or [])):
+        return ms.get_sale_price(ass)
+    href = ((ass.get("meta") or {}).get("href")) if isinstance(ass.get("meta"), dict) else None
+    if href:
+        full = ms.get_by_href(href)
+        return ms.get_sale_price(full)
+    return 0
+
+
+def expand_bundle_positions(
+    ms: MoySkladClient,
+    bundle_ass: dict,
+    bundle_qty: float,
+) -> List[Dict]:
+    """
+    Разворачиваем bundle -> компоненты.
+    ВАЖНО: если по какой-то причине компоненты не получить — возвращаем позицию самого bundle (fallback),
+    чтобы поставка НЕ пропускалась.
+    """
+    bundle_id = bundle_ass["id"]
+    try:
+        rows = ms.get_bundle_components(bundle_id)
+    except Exception as e:
+        print({"action": "bundle_expansion_failed", "bundle_id": bundle_id, "error": str(e)[:300]})
+        rows = []
+
+    if not rows:
+        # fallback: оставляем сам комплект
+        price = ms_price_for_assortment(ms, bundle_ass)
+        return [
+            {
+                "assortment": {"meta": bundle_ass["meta"]},
+                "quantity": float(bundle_qty),
+                "price": int(price),
+            }
+        ]
+
+    out: List[Dict] = []
+    for r in rows:
+        comp_qty = float(r.get("quantity") or 0)
+        a = r.get("assortment") or {}
+        meta = a.get("meta") or {}
+        href = meta.get("href")
+        if not href:
+            continue
+        comp_full = ms.get_by_href(href)
+        price = ms.get_sale_price(comp_full)
+        out.append(
+            {
+                "assortment": {"meta": comp_full["meta"]},
+                "quantity": float(bundle_qty) * comp_qty,
+                "price": int(price),
+            }
+        )
+    if not out:
+        # fallback если вдруг всё было кривое
+        price = ms_price_for_assortment(ms, bundle_ass)
+        return [
+            {
+                "assortment": {"meta": bundle_ass["meta"]},
+                "quantity": float(bundle_qty),
+                "price": int(price),
+            }
+        ]
+    return out
+
+
+def build_order_positions_from_ozon_items(ms: MoySkladClient, items: List[Tuple[str, float]]) -> List[Dict]:
+    """
+    items: [(offer_id/article, qty), ...]
+    Для каждого offer_id:
+      - ищем ассортимент в МС по article
+      - если bundle -> разворачиваем на компоненты
+      - иначе добавляем как есть
+    """
+    positions: List[Dict] = []
+    for article, qty in items:
+        ass = ms.find_assortment_by_article(article)
+        if not ass:
+            print({"action": "ms_assortment_not_found", "article": article})
+            continue
+
+        t = (ass.get("meta") or {}).get("type")
+        if t == "bundle":
+            expanded = expand_bundle_positions(ms, ass, float(qty))
+            positions.extend(expanded)
+        else:
+            price = ms_price_for_assortment(ms, ass)
+            positions.append(
+                {
+                    "assortment": {"meta": ass["meta"]},
+                    "quantity": float(qty),
+                    "price": int(price),
+                }
+            )
+    return positions
+
+
 def sync():
     cfg = load_config()
     ms = MoySkladClient(cfg.moysklad_token)
 
     planned_from = cfg.fbo_planned_from  # date | None
     exclude_ids = cfg.fbo_exclude_order_ids or set()
+
+    total_seen = 0
+    total_synced = 0
 
     for cab_index, cab in enumerate(cfg.cabinets):
         oz = OzonFboClient(cab.client_id, cab.api_key)
@@ -78,8 +185,9 @@ def sync():
             if state == CANCELLED:
                 continue
 
-            # ВАЖНО: iter_supply_order_ids должен быть в ozon_fbo.py (у тебя уже был/мы раньше делали)
-            for order_id in oz.iter_supply_order_ids(state=state, limit=100, sort_by=1, sort_dir="DESC"):
+            for order_id in oz.iter_supply_order_ids(state=state, limit=100, sort_by=None, sort_dir=None):
+                total_seen += 1
+
                 if order_id in exclude_ids:
                     print({"action": "skip_excluded_order", "order_id": order_id})
                     continue
@@ -88,174 +196,111 @@ def sync():
                 order_number = str(detail["order_number"])
                 ext = fbo_external_code(order_number)
 
+                # timeslot filter
                 shipment_dt = parse_ozon_timeslot_from(detail)
-                if planned_from and shipment_dt.date() < planned_from:
-                    continue
-
-                supply = (detail.get("supplies") or [None])[0]
-                if not supply:
-                    continue
-
-                bundle_id = supply.get("bundle_id")
-                if not bundle_id:
-                    print({"action": "skip_no_bundle_id", "order": order_number})
-                    continue
-
-                warehouse_name = (supply.get("storage_warehouse") or {}).get("name") or "Unknown Warehouse"
-                description = f"{order_number} - {warehouse_name}"
-
-                # 1) DEDUP demand по external + если есть demand — НЕ ТРОГАЕМ ВООБЩЕ
-                d0 = dedup_demands_by_external(ms, ext, dry_run=cfg.fbo_dry_run)
-                if d0:
-                    print({"action": "skip_has_demand", "name": order_number, "demand_id": d0["id"]})
-                    continue
-
-                # 2) Получаем список товаров поставки из Ozon bundle
-                oz_bundle = oz.post("/v1/supply-order/bundle", {"bundle_ids": [bundle_id], "limit": 100})
-                items = oz_bundle.get("items") or []
-                if not items:
-                    print({"action": "skip_empty_ozon_bundle", "order": order_number})
-                    continue
-
-                # 3) Строим позиции заказа, разворачиваем комплекты МС
-                positions = []
-                for item in items:
-                    article = str(item.get("offer_id") or "")
-                    qty = float(item.get("quantity") or 0)
-                    if not article or qty <= 0:
+                if planned_from is not None:
+                    # planned_from в конфиге как date
+                    if shipment_dt.date() < planned_from:
+                        print({"action": "skip_before_planned_from", "order": order_number, "ts": shipment_dt.isoformat()})
                         continue
 
-                    ass = ms.find_assortment_by_article(article)
-                    if not ass:
-                        print({"action": "skip_no_assortment", "article": article, "order": order_number})
-                        continue
+                # Ozon bundle items (offer_id, qty)
+                bundle_id = detail["supplies"][0]["bundle_id"]
+                bundle = oz.get_bundle_items([bundle_id], limit=100)
+                oz_items = [(str(i.get("offer_id")), float(i.get("quantity") or 0)) for i in (bundle.get("items") or [])]
+                oz_items = [(a, q) for (a, q) in oz_items if a and q > 0]
 
-                    ass_type = (ass.get("meta") or {}).get("type")
-
-                    # если это комплект МС — разворачиваем в компоненты
-                    if ass_type == "bundle":
-                        comps = ms.get_bundle_components(ass["id"])
-                        if not comps:
-                            # если такое будет — это уже не "не умеем", это "в МС реально пустой комплект"
-                            print({"action": "bundle_empty_in_ms", "bundle_id": ass["id"], "article": article, "order": order_number})
-                            continue
-
-                        for c in comps:
-                            c_ass = c.get("assortment") or {}
-                            c_meta = c_ass.get("meta") or {}
-                            c_qty = float(c.get("quantity") or 0)
-                            if not c_meta or c_qty <= 0:
-                                continue
-
-                            comp_obj = ms.get_by_href(c_meta["href"])
-                            comp_price = ms.get_sale_price(comp_obj)
-
-                            positions.append(
-                                {
-                                    "assortment": {"meta": c_meta},
-                                    "quantity": qty * c_qty,
-                                    "price": comp_price,
-                                }
-                            )
-                    else:
-                        # обычный товар/вариант
-                        ass_full = ms.get_by_href((ass.get("meta") or {}).get("href"))
-                        price = ms.get_sale_price(ass_full) if ass_full else ms.get_sale_price(ass)
-
-                        positions.append(
-                            {
-                                "assortment": {"meta": ass["meta"]},
-                                "quantity": qty,
-                                "price": price,
-                            }
-                        )
-
+                positions = build_order_positions_from_ozon_items(ms, oz_items)
                 if not positions:
+                    # не падаем, просто логируем (но поставка реально пустая/не найдены товары)
+                    print({"action": "skip_no_positions", "order": order_number, "order_id": order_id})
                     continue
 
-                # 4) CustomerOrder (всё строго через meta)
-                order_payload = {
+                warehouse_name = (detail.get("warehouse") or {}).get("name") or ""
+                comment = f"{order_number} - {warehouse_name}".strip(" -")
+
+                payload = {
                     "name": order_number,
                     "externalCode": ext,
                     "organization": ms.meta("organization", ORGANIZATION_ID),
                     "agent": ms.meta("counterparty", AGENT_ID),
                     "state": ms.meta("state", ORDER_STATE_ID),
                     "salesChannel": ms.meta("saleschannel", sales_channel_id),
-                    "description": description,
-                    "positions": positions,
-                    "deliveryPlannedMoment": shipment_dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                    "description": comment,
+                    "deliveryPlannedMoment": shipment_dt.strftime("%Y-%m-%d %H:%M:%S.000"),
                     "store": ms.meta("store", STORE_ID),
+                    "positions": positions,
                 }
 
-                print(ensure_customerorder(ms, order_payload, dry_run=cfg.fbo_dry_run))
+                result = ensure_customerorder(ms, payload, dry_run=cfg.fbo_dry_run)
+                order = result.get("order") or result  # совместимость
+                order_id_ms = order["id"]
 
-                # 5) Получаем id заказа (по externalCode железобетонно)
-                rows = ms.get("/entity/customerorder", params={"filter": f"externalCode={ext}", "limit": 1}).get("rows") or []
-                if not rows:
-                    continue
-                order_id_ms = rows[0]["id"]
+                total_synced += 1
 
-                # 6) Move 1:1 (по externalCode), обновляем только позиции
-                mv0 = dedup_moves_by_external(ms, ext, dry_run=cfg.fbo_dry_run)
-                move_positions = build_move_positions_from_order_positions(order_payload["positions"])
+                # ДЕДУП по externalCode (чистим руками/старые дубли)
+                if not cfg.fbo_dry_run:
+                    dedup_moves_by_external(ms, ext)
+                    dedup_demands_by_external(ms, ext)
 
-                if not mv0:
-                    if cfg.fbo_dry_run:
-                        print({"action": "dry_run_move_create", "name": order_number, "positions": len(move_positions)})
-                        move_id = None
+                # MOVE: 1 заказ = 1 перемещение (обновляем только состав)
+                move_positions = build_move_positions_from_order_positions(ms, order)
+                if cfg.fbo_dry_run:
+                    print({"action": "dry_run_move", "order": order_number, "positions": len(move_positions)})
+                else:
+                    mv = create_move(
+                        ms,
+                        name=order_number,
+                        external_code=ext,
+                        organization_id=ORGANIZATION_ID,
+                        source_store_id=MOVE_SOURCE_STORE_ID,
+                        target_store_id=MOVE_TARGET_STORE_ID,
+                        state_id=MOVE_STATE_ID,
+                        description=comment,
+                        customerorder_id=order_id_ms,
+                        positions=move_positions,
+                    )
+                    update_move_positions_only(ms, mv["id"], move_positions)
+
+                    r = try_apply_move(ms, mv["id"])
+                    if r.get("applied"):
+                        print({"action": "move_applied", "id": mv["id"]})
                     else:
-                        mv = create_move(
+                        print({"action": "move_left_unapplied", "id": mv["id"], "reason": r.get("reason")})
+
+                # DEMAND (отгрузка): только для нужных статусов; 1 заказ = 1 отгрузка; если уже есть — не обновляем
+                if state in DEMAND_OZON_STATES:
+                    demand_positions = build_demand_positions_from_order_positions(ms, order)
+
+                    if cfg.fbo_dry_run:
+                        print({"action": "dry_run_demand", "order": order_number, "positions": len(demand_positions)})
+                    else:
+                        dm = create_demand(
                             ms,
                             name=order_number,
                             external_code=ext,
                             organization_id=ORGANIZATION_ID,
-                            state_id=MOVE_STATE_ID,
-                            source_store_id=MOVE_SOURCE_STORE_ID,
-                            target_store_id=MOVE_TARGET_STORE_ID,
-                            description=description,
+                            agent_id=AGENT_ID,
+                            store_id=STORE_ID,
+                            state_id=DEMAND_STATE_ID,
+                            description=comment,
                             customerorder_id=order_id_ms,
-                            positions=move_positions,
+                            positions=demand_positions,
                         )
-                        move_id = mv.get("id")
-                        print({"action": "move_created", "id": move_id, "name": order_number})
-                else:
-                    if cfg.fbo_dry_run:
-                        print({"action": "dry_run_move_update", "id": mv0["id"], "name": order_number})
-                        move_id = mv0["id"]
-                    else:
-                        update_move_positions_only(ms, mv0["id"], move_positions)
-                        move_id = mv0["id"]
-                        print({"action": "move_updated", "id": move_id, "name": order_number})
+                        r = try_apply_demand(ms, dm["id"])
+                        if r.get("applied"):
+                            print({"action": "demand_applied", "id": dm["id"]})
+                        else:
+                            print({"action": "demand_left_unapplied", "id": dm["id"], "reason": r.get("reason")})
 
-                if (not cfg.fbo_dry_run) and move_id:
-                    print(try_apply_move(ms, move_id))
-
-                # 7) Demand 1:1 для нужных статусов
-                if state not in DEMAND_OZON_STATES:
-                    continue
-
-                demand_positions = build_demand_positions_from_order_positions(order_payload["positions"])
-
-                if cfg.fbo_dry_run:
-                    print({"action": "dry_run_demand_create", "name": order_number, "positions": len(demand_positions)})
-                    continue
-
-                dm = create_demand(
-                    ms,
-                    name=order_number,
-                    external_code=ext,
-                    organization_id=ORGANIZATION_ID,
-                    agent_id=AGENT_ID,
-                    state_id=DEMAND_STATE_ID,
-                    store_id=STORE_ID,
-                    description=description,
-                    customerorder_id=order_id_ms,
-                    positions=demand_positions,
-                )
-                demand_id = dm.get("id")
-                print({"action": "demand_created", "id": demand_id, "name": order_number})
-                if demand_id:
-                    print(try_apply_demand(ms, demand_id))
+    print(
+        {
+            "action": "summary",
+            "total_seen_order_ids": total_seen,
+            "total_synced_orders": total_synced,
+            "dry_run": bool(cfg.fbo_dry_run),
+        }
+    )
 
 
 if __name__ == "__main__":
