@@ -1,6 +1,3 @@
-cd /root/ozon_ms_fbo_integration
-
-cat > app/moysklad.py <<'PY'
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -75,4 +72,3 @@ class MoySkladClient:
             if v:
                 return int(v)
         return 0
-PY
