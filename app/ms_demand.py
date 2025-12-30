@@ -1,82 +1,46 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from .http import HttpError
 from .moysklad import MoySkladClient
+from .http import HttpError
 
 
-def find_demands_by_external(ms: MoySkladClient, external: str, limit: int = 100) -> list[Dict[str, Any]]:
-    res = ms.get("/entity/demand", params={"filter": f"externalCode={external}", "limit": limit})
+def _find_demands_by_external(ms: MoySkladClient, external_code: str) -> List[Dict[str, Any]]:
+    res = ms.get("/entity/demand", params={"filter": f"externalCode={external_code}", "limit": 100})
     return res.get("rows") or []
 
 
-def dedup_demands_by_external(ms: MoySkladClient, external: str, *, dry_run: bool) -> Optional[Dict[str, Any]]:
-    rows = find_demands_by_external(ms, external)
+def find_demands_by_external(ms: MoySkladClient, external_code: str) -> List[Dict[str, Any]]:
+    return _find_demands_by_external(ms, external_code)
+
+
+def dedup_demands_by_external(ms: MoySkladClient, external_code: str, dry_run: bool) -> Optional[Dict[str, Any]]:
+    rows = _find_demands_by_external(ms, external_code)
     if not rows:
         return None
 
-    # оставляем самую свежую
-    rows_sorted = sorted(rows, key=lambda r: (r.get("updated") or "", r.get("moment") or "", r.get("id") or ""), reverse=True)
-    keep = rows_sorted[0]
-    dups = [r for r in rows_sorted[1:] if r.get("id")]
+    rows_sorted = sorted(rows, key=lambda r: r.get("updated") or "")
+    keep = rows_sorted[-1]
 
-    for d in dups:
+    extras = [r for r in rows_sorted if r.get("id") != keep.get("id")]
+    if extras:
         if dry_run:
-            print({"action": "dry_run_delete_demand_duplicate", "id": d["id"], "externalCode": external})
-        else:
-            ms.delete(f"/entity/demand/{d['id']}")
-            print({"action": "deleted_demand_duplicate", "id": d["id"], "externalCode": external})
+            return keep
+        for r in extras:
+            rid = r.get("id")
+            if rid:
+                ms.delete(f"/entity/demand/{rid}")
 
     return keep
 
 
-def build_demand_positions_from_order_positions(order_positions: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
-    out: list[Dict[str, Any]] = []
-    for p in order_positions:
-        qty = float(p.get("quantity") or 0)
-        if qty <= 0:
-            continue
-
-        ass = p.get("assortment") or {}
-        meta = ass.get("meta") if isinstance(ass, dict) and "meta" in ass else ass
-
-        out.append(
-            {
-                "assortment": {"meta": meta},
-                "quantity": qty,
-                "price": int(p.get("price") or 0),
-            }
-        )
-    return out
-
-
-def create_demand(
-    ms: MoySkladClient,
-    *,
-    name: str,
-    external_code: str,
-    organization_id: str,
-    agent_id: str,
-    state_id: str,
-    store_id: str,
-    description: str,
-    customerorder_id: str,
-    positions: list[Dict[str, Any]],
-) -> Dict[str, Any]:
-    payload = {
-        "name": name,
-        "externalCode": external_code,
-        "organization": ms.meta("organization", organization_id),
-        "agent": ms.meta("counterparty", agent_id),
-        "state": ms.meta("state", state_id),
-        "store": ms.meta("store", store_id),
-        "description": description,
-        "customerOrder": ms.meta("customerorder", customerorder_id),
-        "positions": positions,
-        "applicable": False,
-    }
+def create_demand(ms: MoySkladClient, payload: Dict[str, Any]) -> Dict[str, Any]:
     return ms.post("/entity/demand", payload)
+
+
+def update_demand_positions_only(ms: MoySkladClient, demand_id: str, positions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return ms.put(f"/entity/demand/{demand_id}", {"positions": positions})
 
 
 def try_apply_demand(ms: MoySkladClient, demand_id: str) -> Dict[str, Any]:
@@ -84,5 +48,16 @@ def try_apply_demand(ms: MoySkladClient, demand_id: str) -> Dict[str, Any]:
         ms.put(f"/entity/demand/{demand_id}", {"applicable": True})
         return {"action": "demand_applied", "id": demand_id}
     except HttpError as e:
-        msg = str(e)
-        return {"action": "demand_apply_failed", "id": demand_id, "error": msg[:400]}
+        return {"action": "demand_left_unapplied", "id": demand_id, "error": str(e)[:300]}
+
+
+def build_demand_positions_from_order_positions(order_positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for p in order_positions:
+        ass = p.get("assortment") or {}
+        qty = p.get("quantity")
+        price = p.get("price", 0)
+        if not ass or qty in (None, 0, 0.0):
+            continue
+        out.append({"assortment": ass, "quantity": qty, "price": price})
+    return out
