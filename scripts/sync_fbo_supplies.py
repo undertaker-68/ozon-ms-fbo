@@ -206,7 +206,13 @@ def sync():
 
                 # Ozon bundle items (offer_id, qty)
                 bundle_id = detail["supplies"][0]["bundle_id"]
-                bundle = oz.get_bundle_items([bundle_id], limit=100)
+                bundle = oz.post(
+                    "/v1/supply-order/bundle",
+                    {
+                        "bundle_ids": [bundle_id],
+                        "limit": 100,
+                    },
+                )
                 oz_items = [(str(i.get("offer_id")), float(i.get("quantity") or 0)) for i in (bundle.get("items") or [])]
                 oz_items = [(a, q) for (a, q) in oz_items if a and q > 0]
 
