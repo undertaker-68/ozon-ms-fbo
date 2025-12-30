@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterator, Optional
 
 from .http import request_json
 
 
-@dataclass(frozen=True)
+@dataclass
 class OzonFboClient:
     client_id: str
     api_key: str
@@ -15,42 +16,56 @@ class OzonFboClient:
     @property
     def headers(self) -> Dict[str, str]:
         return {
-            "Client-Id": self.client_id,
-            "Api-Key": self.api_key,
-            "Content-Type": "application/json",
+            "Client-Id": str(self.client_id),
+            "Api-Key": str(self.api_key),
+            "Content-Type": "application/json; charset=utf-8",
         }
 
     def post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return request_json(
-            "POST",
-            self.base_url + path,
-            headers=self.headers,
-            json_body=payload,
-            timeout=30,
-        )
+        return request_json("POST", self.base_url + path, headers=self.headers, json_body=payload)
+
+    # ---------- supply orders ----------
 
     def list_supply_order_ids(
         self,
-        states: List[int],
-        limit: int = 100,
+        *,
+        state: int,
         from_supply_order_id: int = 0,
+        limit: int = 100,
         sort_by: Optional[int] = None,
         sort_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """
+        ВАЖНО:
+        - НЕЛЬЗЯ отправлять sort_by=0 (Ozon 400).
+        - Если sort_by/sort_dir не заданы — НЕ отправляем их вообще.
+        """
         payload: Dict[str, Any] = {
             "filter": {
-                "states": states,
-                "from_supply_order_id": from_supply_order_id,
+                "states": [int(state)],
+                "from_supply_order_id": int(from_supply_order_id),
             },
-            "limit": limit,
+            "limit": int(limit),
         }
-        # sort_by/sort_dir у Озона могут быть капризными — задаём только если явно передали
+
+        # добавляем сортировку только если она явно задана
         if sort_by is not None:
-            payload["sort_by"] = sort_by
+            sb = int(sort_by)
+            if sb == 0:
+                # 0 запрещён Ozon-ом -> лучше вообще не слать
+                pass
+            else:
+                payload["sort_by"] = sb
+
         if sort_dir is not None:
-            payload["sort_dir"] = sort_dir
+            sd = str(sort_dir).upper()
+            if sd in ("ASC", "DESC"):
+                payload["sort_dir"] = sd
 
         return self.post("/v3/supply-order/list", payload)
+
+    def get_supply_orders(self, order_ids: list[int]) -> Dict[str, Any]:
+        return self.post("/v3/supply-order/get", {"order_ids": order_ids})
 
     def iter_supply_order_ids(
         self,
@@ -59,53 +74,33 @@ class OzonFboClient:
         limit: int = 100,
         sort_by: Optional[int] = None,
         sort_dir: Optional[str] = None,
-        max_pages: int = 10000,
-    ) -> Iterable[int]:
+        sleep_sec: float = 0.05,
+    ) -> Iterator[int]:
         """
-        Пагинация через from_supply_order_id.
-        Озон обычно возвращает order_ids отсортированные ASC по id при sort_dir=ASC,
-        поэтому безопасно двигать курсор как max(order_ids).
+        Итератор по order_id с пагинацией через from_supply_order_id.
         """
-        cursor = 0
-        seen: set[int] = set()
-
-        for _ in range(max_pages):
+        last = 0
+        while True:
             data = self.list_supply_order_ids(
-                states=[state],
+                state=state,
+                from_supply_order_id=last,
                 limit=limit,
-                from_supply_order_id=cursor,
                 sort_by=sort_by,
                 sort_dir=sort_dir,
             )
+
             ids = data.get("order_ids") or []
+            for oid in ids:
+                yield int(oid)
+
+            # если пусто — закончили
             if not ids:
                 break
 
-            progressed = False
-            for oid in ids:
-                if not isinstance(oid, int):
-                    continue
-                if oid in seen:
-                    continue
-                seen.add(oid)
-                progressed = True
-                yield oid
+            # Ozon ожидает “следующую страницу” от last_id / from_supply_order_id
+            last = int(data.get("last_id") or ids[-1])
 
-            # двигаем курсор
-            mx = max([i for i in ids if isinstance(i, int)], default=cursor)
-            if mx <= cursor and not progressed:
-                break
-            cursor = mx
-
-            # если Озон вернул меньше лимита — страниц больше нет
-            if len(ids) < limit:
+            if not data.get("has_next"):
                 break
 
-    def get_supply_orders(self, order_ids: List[int]) -> Dict[str, Any]:
-        return self.post("/v3/supply-order/get", {"order_ids": order_ids})
-
-    def get_bundle_items(self, bundle_ids: List[str], limit: int = 100) -> Dict[str, Any]:
-        """
-        Ozon bundle (FBO): возвращает items (offer_id, quantity, ...).
-        """
-        return self.post("/v1/supply-order/bundle", {"bundle_ids": bundle_ids, "limit": limit})
+            time.sleep(sleep_sec)
