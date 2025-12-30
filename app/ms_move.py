@@ -5,89 +5,48 @@ from typing import Any, Dict, List, Optional
 from .moysklad import MoySkladClient
 from .http import HttpError
 
-MS_BASE = "https://api.moysklad.ru/api/remap/1.2"
-FBO_EXT_PREFIX = "OZON_FBO:"
 
-
-def fbo_external_code(order_number: str) -> str:
-    return f"{FBO_EXT_PREFIX}{order_number}"
-
-
-def _pick_latest(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    rows_sorted = sorted(rows, key=lambda r: (r.get("updated") or ""), reverse=True)
-    return rows_sorted[0]
-
-
-def find_moves_by_external(ms: MoySkladClient, external_code: str, limit: int = 100) -> List[Dict[str, Any]]:
-    res = ms.get("/entity/move", params={"filter": f"externalCode={external_code}", "limit": limit})
+def _find_moves_by_external(ms: MoySkladClient, external_code: str) -> List[Dict[str, Any]]:
+    res = ms.get("/entity/move", params={"filter": f"externalCode={external_code}", "limit": 100})
     return res.get("rows") or []
 
 
+# ПУБЛИЧНЫЙ алиас (чтобы импорты не падали)
+def find_moves_by_external(ms: MoySkladClient, external_code: str) -> List[Dict[str, Any]]:
+    return _find_moves_by_external(ms, external_code)
+
+
 def dedup_moves_by_external(ms: MoySkladClient, external_code: str, dry_run: bool) -> Optional[Dict[str, Any]]:
-    rows = find_moves_by_external(ms, external_code)
+    rows = _find_moves_by_external(ms, external_code)
     if not rows:
         return None
 
-    keep = _pick_latest(rows)
-    dups = [r for r in rows if r.get("id") and r["id"] != keep.get("id")]
+    rows_sorted = sorted(rows, key=lambda r: r.get("updated") or "")
+    keep = rows_sorted[-1]
 
-    for d in dups:
+    extras = [r for r in rows_sorted if r.get("id") != keep.get("id")]
+    if extras:
         if dry_run:
-            print({"action": "dry_run_delete_duplicate_move", "id": d["id"], "externalCode": external_code})
-        else:
-            ms.delete(f"/entity/move/{d['id']}")
-            print({"action": "deleted_duplicate_move", "id": d["id"], "externalCode": external_code})
+            return keep
+        for r in extras:
+            rid = r.get("id")
+            if rid:
+                ms.delete(f"/entity/move/{rid}")
 
     return keep
 
 
-def build_move_positions_from_order_positions(order_positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    res: List[Dict[str, Any]] = []
-    for p in order_positions or []:
-        ass_meta = (p.get("assortment") or {}).get("meta")
-        if not ass_meta:
-            continue
-        qty = float(p.get("quantity") or 0)
-        if qty <= 0:
-            continue
-        row = {"assortment": {"meta": ass_meta}, "quantity": qty}
-        # price в move можно не ставить, но если есть — оставим
-        if p.get("price") is not None:
-            row["price"] = int(p.get("price") or 0)
-        res.append(row)
-    return res
-
-
-def create_move(
-    ms: MoySkladClient,
-    *,
-    name: str,
-    external_code: str,
-    organization_id: str,
-    state_id: str,
-    source_store_id: str,
-    target_store_id: str,
-    description: str,
-    customerorder_id: str,
-    positions: list[Dict[str, Any]],
-) -> Dict[str, Any]:
-    payload = {
-        "name": name,
-        "externalCode": external_code,
-        "organization": ms.meta("organization", organization_id),
-        "state": ms.meta("state", state_id),
-        "sourceStore": ms.meta("store", source_store_id),
-        "targetStore": ms.meta("store", target_store_id),
-        "description": description,
-        "customerOrder": ms.meta("customerorder", customerorder_id),
-        "positions": positions,
-        "applicable": False,
-    }
+def create_move(ms: MoySkladClient, payload: Dict[str, Any]) -> Dict[str, Any]:
     return ms.post("/entity/move", payload)
 
 
-def update_move_positions_only(ms: MoySkladClient, move_id: str, positions: list[Dict[str, Any]]) -> None:
-    ms.put(f"/entity/move/{move_id}", {"positions": positions})
+def update_move_positions_only(ms: MoySkladClient, move_id: str, positions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return ms.put(f"/entity/move/{move_id}", {"positions": positions})
+
+
+# совместимость с твоими импортами
+def update_move_positions_only_(ms: MoySkladClient, move_id: str, positions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return update_move_positions_only(ms, move_id, positions)
 
 
 def try_apply_move(ms: MoySkladClient, move_id: str) -> Dict[str, Any]:
@@ -96,6 +55,19 @@ def try_apply_move(ms: MoySkladClient, move_id: str) -> Dict[str, Any]:
         return {"action": "move_applied", "id": move_id}
     except HttpError as e:
         msg = str(e)
+        # “Нельзя переместить товар, которого нет на складе”
         if "Нельзя переместить товар" in msg or "code\" : 3007" in msg:
             return {"action": "move_left_unapplied", "id": move_id, "reason": "not_enough_stock"}
         return {"action": "move_apply_failed", "id": move_id, "error": msg[:300]}
+
+
+def build_move_positions_from_order_positions(order_positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for p in order_positions:
+        ass = p.get("assortment") or {}
+        qty = p.get("quantity")
+        price = p.get("price", 0)
+        if not ass or qty in (None, 0, 0.0):
+            continue
+        out.append({"assortment": ass, "quantity": qty, "price": price})
+    return out
