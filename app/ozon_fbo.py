@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from .http import request_json
 
@@ -17,49 +17,63 @@ class OzonFboClient:
         return {
             "Client-Id": self.client_id,
             "Api-Key": self.api_key,
-            "Content-Type": "application/json; charset=utf-8",
+            "Content-Type": "application/json",
         }
 
     def post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return request_json("POST", self.base_url + path, headers=self.headers, json_body=payload)
+        return request_json(
+            "POST",
+            self.base_url + path,
+            headers=self.headers,
+            json_body=payload,
+            timeout=60,
+        )
 
-    # --------- API wrappers ---------
+    # ---------- Supply Orders ----------
 
     def list_supply_order_ids(
         self,
-        *,
         state: int,
         limit: int = 100,
         from_supply_order_id: str | int = 0,
     ) -> Dict[str, Any]:
-        # ВАЖНО: sort_by / sort_dir НЕ отправляем вообще (Ozon валидирует и падает на 0/None)
-        payload: Dict[str, Any] = {
+        # ВАЖНО: sort_by/sort_dir НЕ трогаем динамически.
+        # У тебя подтверждено, что вызов без "sort_by=None" работает.
+        payload = {
             "filter": {
                 "states": [state],
                 "from_supply_order_id": from_supply_order_id,
             },
-            "limit": int(limit),
+            "limit": limit,
+            # Оставляем как “железобетонно рабочее”
+            "sort_by": 1,
+            "sort_dir": "ASC",
         }
         return self.post("/v3/supply-order/list", payload)
 
-    def iter_supply_order_ids(self, *, state: int, limit: int = 100) -> Iterable[int]:
-        last_id: str | int = 0
+    def iter_supply_order_ids(self, state: int, limit: int = 100) -> Iterator[int]:
+        last: str | int = 0
         while True:
-            data = self.list_supply_order_ids(state=state, limit=limit, from_supply_order_id=last_id)
+            data = self.list_supply_order_ids(state=state, limit=limit, from_supply_order_id=last)
             ids = data.get("order_ids") or []
-            for x in ids:
-                if isinstance(x, int):
-                    yield x
+            for oid in ids:
+                if isinstance(oid, int):
+                    yield oid
 
-            new_last = data.get("last_id")
-            # если last_id не пришел или список пуст — заканчиваем
-            if not new_last or not ids:
+            last_id = data.get("last_id")
+            if not last_id:
                 break
-            last_id = new_last
+            last = last_id
 
-    def get_supply_orders(self, order_ids: list[int]) -> Dict[str, Any]:
-        return self.post("/v1/supply-order/get", {"order_ids": order_ids})
+            # защита от “вечного” цикла, если API вдруг вернет тот же last_id
+            if not ids:
+                break
 
-    def get_bundle(self, bundle_ids: list[str], limit: int = 100) -> Dict[str, Any]:
-        # Возвращает items: offer_id, quantity
-        return self.post("/v1/supply-order/bundle", {"bundle_ids": bundle_ids, "limit": int(limit)})
+    def get_supply_orders(self, order_ids: List[int]) -> Dict[str, Any]:
+        return self.post("/v3/supply-order/get", {"order_ids": order_ids})
+
+    # ---------- Bundle items from Ozon (supply-order bundle) ----------
+
+    def get_bundle_items(self, bundle_ids: List[str], limit: int = 100) -> Dict[str, Any]:
+        # Это то, что ты руками тестил: /v1/supply-order/bundle
+        return self.post("/v1/supply-order/bundle", {"bundle_ids": bundle_ids, "limit": limit})
