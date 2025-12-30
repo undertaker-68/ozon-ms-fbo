@@ -11,6 +11,11 @@ def _find_moves_by_external(ms: MoySkladClient, external: str) -> list[Dict[str,
     return res.get("rows") or []
 
 
+# публичный alias (чтобы импорт не падал)
+def find_moves_by_external(ms: MoySkladClient, external: str) -> list[Dict[str, Any]]:
+    return _find_moves_by_external(ms, external)
+
+
 def dedup_moves_by_external(ms: MoySkladClient, external: str, *, dry_run: bool) -> Optional[Dict[str, Any]]:
     rows = _find_moves_by_external(ms, external)
     if not rows:
@@ -31,15 +36,19 @@ def dedup_moves_by_external(ms: MoySkladClient, external: str, *, dry_run: bool)
 
 
 def build_move_positions_from_order_positions(order_positions: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
-    positions = []
+    positions: list[Dict[str, Any]] = []
     for p in order_positions:
+        qty = float(p.get("quantity") or 0)
+        if qty <= 0:
+            continue
+
         ass = p.get("assortment") or {}
-        # у нас в order_positions: {"assortment":{"meta":...}}
-        meta = ass.get("meta") if "meta" in ass else ass
+        meta = ass.get("meta") if isinstance(ass, dict) and "meta" in ass else ass
+
         positions.append(
             {
                 "assortment": {"meta": meta},
-                "quantity": float(p.get("quantity") or 0),
+                "quantity": qty,
                 "price": int(p.get("price") or 0),
             }
         )
@@ -86,4 +95,4 @@ def try_apply_move(ms: MoySkladClient, move_id: str) -> Dict[str, Any]:
         msg = str(e)
         if "Нельзя переместить товар" in msg or "code\" : 3007" in msg:
             return {"action": "move_left_unapplied", "id": move_id, "reason": "not_enough_stock"}
-        return {"action": "move_apply_failed", "id": move_id, "error": msg[:300]}
+        return {"action": "move_apply_failed", "id": move_id, "error": msg[:400]}
