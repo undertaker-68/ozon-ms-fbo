@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from .http import request_json
 
@@ -32,21 +32,24 @@ class OzonFboClient:
     def list_supply_order_ids(
         self,
         states: List[int],
-        *,
         limit: int = 100,
         from_supply_order_id: int = 0,
-        sort_by: int = 1,
-        sort_dir: str = "DESC",
+        sort_by: Optional[int] = None,
+        sort_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
-        payload = {
+        payload: Dict[str, Any] = {
             "filter": {
                 "states": states,
                 "from_supply_order_id": from_supply_order_id,
             },
             "limit": limit,
-            "sort_by": sort_by,
-            "sort_dir": sort_dir,
         }
+        # sort_by/sort_dir у Озона могут быть капризными — задаём только если явно передали
+        if sort_by is not None:
+            payload["sort_by"] = sort_by
+        if sort_dir is not None:
+            payload["sort_dir"] = sort_dir
+
         return self.post("/v3/supply-order/list", payload)
 
     def iter_supply_order_ids(
@@ -54,73 +57,55 @@ class OzonFboClient:
         *,
         state: int,
         limit: int = 100,
-        sort_by: int = 1,
-        sort_dir: str = "DESC",
-        max_pages: int = 10_000,
-    ):
+        sort_by: Optional[int] = None,
+        sort_dir: Optional[str] = None,
+        max_pages: int = 10000,
+    ) -> Iterable[int]:
         """
-        Надёжный пагинатор по /v3/supply-order/list.
-
-        В ответах Ozon в разных версиях бывает:
-          - order_ids: [...]
-          - has_next: bool
-          - last_id: "..."  (иногда строка)
-          - last_id: 123    (иногда int)
-        Также иногда может быть last_supply_order_id / next_from_supply_order_id.
-        Поэтому делаем максимально устойчиво.
+        Пагинация через from_supply_order_id.
+        Озон обычно возвращает order_ids отсортированные ASC по id при sort_dir=ASC,
+        поэтому безопасно двигать курсор как max(order_ids).
         """
-        from_id = 0
-        pages = 0
+        cursor = 0
+        seen: set[int] = set()
 
-        while True:
-            pages += 1
-            if pages > max_pages:
-                break
-
-            resp = self.list_supply_order_ids(
-                [state],
+        for _ in range(max_pages):
+            data = self.list_supply_order_ids(
+                states=[state],
                 limit=limit,
-                from_supply_order_id=from_id,
+                from_supply_order_id=cursor,
                 sort_by=sort_by,
                 sort_dir=sort_dir,
             )
-
-            ids = resp.get("order_ids") or []
-            for oid in ids:
-                yield oid
-
-            # определяем "следующую страницу"
-            has_next = resp.get("has_next")
-            last_id = resp.get("last_id")
-
-            # иногда last_id приходит строкой
-            next_from: Optional[int] = None
-            if isinstance(last_id, int):
-                next_from = last_id
-            elif isinstance(last_id, str) and last_id.strip().isdigit():
-                next_from = int(last_id.strip())
-
-            # альтернативные поля (на всякий случай)
-            alt = resp.get("last_supply_order_id") or resp.get("next_from_supply_order_id")
-            if next_from is None and isinstance(alt, int):
-                next_from = alt
-            if next_from is None and isinstance(alt, str) and alt.strip().isdigit():
-                next_from = int(alt.strip())
-
-            # условия остановки
+            ids = data.get("order_ids") or []
             if not ids:
                 break
-            if has_next is False:
-                break
-            if next_from is None:
-                # если API не даёт курсор — дальше не пойдём, чтобы не зациклиться
-                break
 
-            # защита от вечного цикла при одинаковом курсоре
-            if next_from == from_id:
-                break
+            progressed = False
+            for oid in ids:
+                if not isinstance(oid, int):
+                    continue
+                if oid in seen:
+                    continue
+                seen.add(oid)
+                progressed = True
+                yield oid
 
-            from_id = next_from
+            # двигаем курсор
+            mx = max([i for i in ids if isinstance(i, int)], default=cursor)
+            if mx <= cursor and not progressed:
+                break
+            cursor = mx
+
+            # если Озон вернул меньше лимита — страниц больше нет
+            if len(ids) < limit:
+                break
 
     def get_supply_orders(self, order_ids: List[int]) -> Dict[str, Any]:
         return self.post("/v3/supply-order/get", {"order_ids": order_ids})
+
+    def get_bundle_items(self, bundle_ids: List[str], limit: int = 100) -> Dict[str, Any]:
+        """
+        Ozon bundle (FBO): возвращает items (offer_id, quantity, ...).
+        """
+        return self.post("/v1/supply-order/bundle", {"bundle_ids": bundle_ids, "limit": limit})
