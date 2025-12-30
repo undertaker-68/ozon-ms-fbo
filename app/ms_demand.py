@@ -4,41 +4,36 @@ from typing import Any, Dict, List, Optional
 
 from app.http import HttpError
 
-MS_BASE = "https://api.moysklad.ru/api/remap/1.2"
-FBO_EXT_PREFIX = "OZON_FBO:"
-
-
-def fbo_external_code(order_number: str) -> str:
-    return f"{FBO_EXT_PREFIX}{order_number}"
-
 
 def _ms_ref(entity: str, id_: str) -> Dict[str, Any]:
     return {
         "meta": {
-            "href": f"{MS_BASE}/entity/{entity}/{id_}",
+            "href": f"https://api.moysklad.ru/api/remap/1.2/entity/{entity}/{id_}",
             "type": entity,
             "mediaType": "application/json",
         }
     }
 
 
-def find_demands_by_external(ms, external_code: str, limit: int = 100) -> List[dict]:
-    res = ms.get("/entity/demand", params={"filter": f"externalCode={external_code}", "limit": limit})
+def find_demand_by_name(ms, name: str) -> Optional[dict]:
+    res = ms.get("/entity/demand", params={"filter": f"name={name}", "limit": 1})
+    rows = res.get("rows") or []
+    return rows[0] if rows else None
+
+
+def find_demands_by_external(ms, external_code: str) -> List[dict]:
+    res = ms.get("/entity/demand", params={"filter": f"externalCode={external_code}", "limit": 100})
     return res.get("rows") or []
 
 
-def _pick_latest(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    rows_sorted = sorted(rows, key=lambda r: (r.get("updated") or ""), reverse=True)
-    return rows_sorted[0]
-
-
-def dedup_demands_by_external(ms, external_code: str, dry_run: bool) -> Optional[dict]:
+def dedup_demands_by_external(ms, external_code: str, *, dry_run: bool) -> Optional[dict]:
     rows = find_demands_by_external(ms, external_code)
     if not rows:
         return None
-
-    keep = _pick_latest(rows)
-    dups = [r for r in rows if r.get("id") and r["id"] != keep.get("id")]
+    # оставляем самый свежий (по updated)
+    rows_sorted = sorted(rows, key=lambda r: r.get("updated") or "", reverse=True)
+    keep = rows_sorted[0]
+    dups = rows_sorted[1:]
 
     for d in dups:
         if dry_run:
@@ -51,30 +46,21 @@ def dedup_demands_by_external(ms, external_code: str, dry_run: bool) -> Optional
 
 
 def build_demand_positions_from_order_positions(order_positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Перекладываем позиции из CustomerOrder в Demand.
-    price берём из заказа (если есть).
-    """
     out: List[Dict[str, Any]] = []
     for p in order_positions:
         qty = float(p.get("quantity") or 0)
         if qty <= 0:
             continue
-
-        ass = p.get("assortment") or {}
-        meta = ass.get("meta") or ass.get("meta", {})
-
-        row: Dict[str, Any] = {
-            "assortment": {"meta": meta},
-            "quantity": qty,
-        }
-
-        # цена не критична, но если есть — поставим
-        if p.get("price") is not None:
-            row["price"] = int(p.get("price") or 0)
-
-        out.append(row)
-
+        price = p.get("price")
+        if price is None:
+            price = 0
+        out.append(
+            {
+                "assortment": p["assortment"],  # ожидаем {"meta": ...}
+                "quantity": qty,
+                "price": int(price),
+            }
+        )
     return out
 
 
@@ -85,8 +71,8 @@ def create_demand(
     external_code: str,
     organization_id: str,
     agent_id: str,
-    state_id: str,
     store_id: str,
+    state_id: str,
     description: str,
     customerorder_id: str,
     positions: List[Dict[str, Any]],
@@ -96,21 +82,17 @@ def create_demand(
         "externalCode": external_code,
         "organization": _ms_ref("organization", organization_id),
         "agent": _ms_ref("counterparty", agent_id),
-        "state": _ms_ref("state", state_id),
         "store": _ms_ref("store", store_id),
+        "state": _ms_ref("state", state_id),
         "description": description,
         "customerOrder": _ms_ref("customerorder", customerorder_id),
         "positions": positions,
-        "applicable": False,  # создаём непроведённой, потом пытаемся провести
+        "applicable": False,
     }
     return ms.post("/entity/demand", payload)
 
 
 def try_apply_demand(ms, demand_id: str) -> Dict[str, Any]:
-    """
-    Пытаемся провести.
-    Если не получилось — возвращаем информацию и НЕ падаем.
-    """
     try:
         updated = ms.put(f"/entity/demand/{demand_id}", {"applicable": True})
         return {"action": "demand_applied", "id": demand_id, "updated": updated}
