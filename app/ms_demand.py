@@ -1,81 +1,118 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from .http import request_json
+from app.http import HttpError
+
+MS_BASE = "https://api.moysklad.ru/api/remap/1.2"
+FBO_EXT_PREFIX = "OZON_FBO:"
 
 
-@dataclass(frozen=True)
-class MoySkladClient:
-    token: str
-    base_url: str = "https://api.moysklad.ru/api/remap/1.2"
+def fbo_external_code(order_number: str) -> str:
+    return f"{FBO_EXT_PREFIX}{order_number}"
 
-    @property
-    def auth_headers(self) -> Dict[str, str]:
-        # ВАЖНО: Accept именно application/json;charset=utf-8 (иначе 400 у МС)
-        return {
-            "Authorization": f"Bearer {self.token}",
-            "Accept": "application/json;charset=utf-8",
+
+def _ms_ref(entity: str, id_: str) -> Dict[str, Any]:
+    return {
+        "meta": {
+            "href": f"{MS_BASE}/entity/{entity}/{id_}",
+            "type": entity,
+            "mediaType": "application/json",
         }
+    }
 
-    def _headers_for_json(self) -> Dict[str, str]:
-        h = dict(self.auth_headers)
-        h["Content-Type"] = "application/json;charset=utf-8"
-        return h
 
-    def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return request_json("GET", self.base_url + path, headers=self.auth_headers, params=params)
+def find_demands_by_external(ms, external_code: str, limit: int = 100) -> List[dict]:
+    res = ms.get("/entity/demand", params={"filter": f"externalCode={external_code}", "limit": limit})
+    return res.get("rows") or []
 
-    def post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return request_json("POST", self.base_url + path, headers=self._headers_for_json(), json_body=payload)
 
-    def put(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return request_json("PUT", self.base_url + path, headers=self._headers_for_json(), json_body=payload)
+def _pick_latest(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    rows_sorted = sorted(rows, key=lambda r: (r.get("updated") or ""), reverse=True)
+    return rows_sorted[0]
 
-    def delete(self, path: str) -> Dict[str, Any]:
-        return request_json("DELETE", self.base_url + path, headers=self.auth_headers)
 
-    # -------- helpers --------
-
-    def meta(self, entity: str, entity_id: str) -> Dict[str, Any]:
-        return {
-            "meta": {
-                "href": f"{self.base_url}/entity/{entity}/{entity_id}",
-                "type": entity,
-                "mediaType": "application/json",
-            }
-        }
-
-    def get_by_href(self, href: str) -> Dict[str, Any]:
-        return request_json("GET", href, headers=self.auth_headers)
-
-    def get_bundle_components(self, bundle_id: str) -> list[Dict[str, Any]]:
-        # правильный путь:
-        # /entity/bundle/{bundle_id}/components
-        res = self.get(f"/entity/bundle/{bundle_id}/components")
-        return res.get("rows") or []
-
-    def find_assortment_by_article(self, article: str) -> Optional[Dict[str, Any]]:
-        # 1) Прямой фильтр по article
-        res = self.get("/entity/assortment", params={"filter": f"article={article}", "limit": 1})
-        rows = res.get("rows") or []
-        if rows:
-            return rows[0]
-
-        # 2) Fallback search (если артикул лежит в code)
-        res = self.get("/entity/assortment", params={"search": article, "limit": 50})
-        rows = res.get("rows") or []
-        for r in rows:
-            if r.get("article") == article or r.get("code") == article:
-                return r
+def dedup_demands_by_external(ms, external_code: str, dry_run: bool) -> Optional[dict]:
+    rows = find_demands_by_external(ms, external_code)
+    if not rows:
         return None
 
-    def get_sale_price(self, product_or_bundle: Dict[str, Any]) -> int:
-        # Берём первую ненулевую цену продажи
-        prices = product_or_bundle.get("salePrices") or []
-        for p in prices:
-            v = p.get("value")
-            if v:
-                return int(v)
-        return 0
+    keep = _pick_latest(rows)
+    dups = [r for r in rows if r.get("id") and r["id"] != keep.get("id")]
+
+    for d in dups:
+        if dry_run:
+            print({"action": "dry_run_delete_duplicate_demand", "id": d["id"], "externalCode": external_code})
+        else:
+            ms.delete(f"/entity/demand/{d['id']}")
+            print({"action": "deleted_duplicate_demand", "id": d["id"], "externalCode": external_code})
+
+    return keep
+
+
+def build_demand_positions_from_order_positions(order_positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Перекладываем позиции из CustomerOrder в Demand.
+    price берём из заказа (если есть).
+    """
+    out: List[Dict[str, Any]] = []
+    for p in order_positions:
+        qty = float(p.get("quantity") or 0)
+        if qty <= 0:
+            continue
+
+        ass = p.get("assortment") or {}
+        meta = ass.get("meta") or ass.get("meta", {})
+
+        row: Dict[str, Any] = {
+            "assortment": {"meta": meta},
+            "quantity": qty,
+        }
+
+        # цена не критична, но если есть — поставим
+        if p.get("price") is not None:
+            row["price"] = int(p.get("price") or 0)
+
+        out.append(row)
+
+    return out
+
+
+def create_demand(
+    ms,
+    *,
+    name: str,
+    external_code: str,
+    organization_id: str,
+    agent_id: str,
+    state_id: str,
+    store_id: str,
+    description: str,
+    customerorder_id: str,
+    positions: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "name": name,
+        "externalCode": external_code,
+        "organization": _ms_ref("organization", organization_id),
+        "agent": _ms_ref("counterparty", agent_id),
+        "state": _ms_ref("state", state_id),
+        "store": _ms_ref("store", store_id),
+        "description": description,
+        "customerOrder": _ms_ref("customerorder", customerorder_id),
+        "positions": positions,
+        "applicable": False,  # создаём непроведённой, потом пытаемся провести
+    }
+    return ms.post("/entity/demand", payload)
+
+
+def try_apply_demand(ms, demand_id: str) -> Dict[str, Any]:
+    """
+    Пытаемся провести.
+    Если не получилось — возвращаем информацию и НЕ падаем.
+    """
+    try:
+        updated = ms.put(f"/entity/demand/{demand_id}", {"applicable": True})
+        return {"action": "demand_applied", "id": demand_id, "updated": updated}
+    except HttpError as e:
+        return {"action": "demand_left_unapplied", "id": demand_id, "error": str(e)}
