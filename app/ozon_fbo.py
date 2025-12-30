@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Iterator, List
 
 from .http import request_json
 
@@ -15,8 +15,8 @@ class OzonFboClient:
     @property
     def headers(self) -> Dict[str, str]:
         return {
-            "Client-Id": str(self.client_id),
-            "Api-Key": str(self.api_key),
+            "Client-Id": self.client_id,
+            "Api-Key": self.api_key,
             "Content-Type": "application/json",
         }
 
@@ -29,64 +29,50 @@ class OzonFboClient:
             timeout=60,
         )
 
-    # ---------------------------------------------------------
-    # /v3/supply-order/list
-    #
-    # ВАЖНО:
-    # Ozon валится, если sort_by отсутствует -> он превращается в 0 (невалидно).
-    # Поэтому ЖЁСТКО передаём sort_by=1 и sort_dir="DESC".
-    # ---------------------------------------------------------
+    # ---------- Supply Orders ----------
+
     def list_supply_order_ids(
         self,
         state: int,
         limit: int = 100,
-        last_id: Union[str, int] = 0,
-        sort_by: int = 1,
-        sort_dir: str = "DESC",
+        from_supply_order_id: str | int = 0,
     ) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
+        # ВАЖНО: НЕ передаем sort_by=None / sort_dir=None вообще.
+        # Используем “железобетонно рабочий” вариант, который у тебя руками проходит.
+        payload = {
             "filter": {
-                "states": [int(state)],
-                "from_supply_order_id": last_id,
+                "states": [state],
+                "from_supply_order_id": from_supply_order_id,
             },
-            "limit": int(limit),
-            "sort_by": int(sort_by),
-            "sort_dir": str(sort_dir),
+            "limit": limit,
+            "sort_by": 1,      # так у тебя проходит (а 0 — падает)
+            "sort_dir": "ASC",
         }
         return self.post("/v3/supply-order/list", payload)
 
-    def iter_supply_order_ids(self, state: int, limit: int = 100):
-        last_id: Union[str, int] = 0
-        seen = set()
-
+    def iter_supply_order_ids(self, state: int, limit: int = 100) -> Iterator[int]:
+        last: str | int = 0
         while True:
-            data = self.list_supply_order_ids(
-                state=state,
-                limit=limit,
-                last_id=last_id,
-                sort_by=1,
-                sort_dir="DESC",
-            )
+            data = self.list_supply_order_ids(state=state, limit=limit, from_supply_order_id=last)
 
             ids = data.get("order_ids") or []
             for oid in ids:
-                if oid in seen:
-                    continue
-                seen.add(oid)
-                yield oid
+                if isinstance(oid, int):
+                    yield oid
 
-            new_last = data.get("last_id")
-            if not new_last:
+            last_id = data.get("last_id")
+            if not last_id:
                 break
+            last = last_id
 
-            # защита от зацикливания
-            if new_last == last_id:
+            # защита от вечного цикла
+            if not ids:
                 break
-
-            last_id = new_last
 
     def get_supply_orders(self, order_ids: List[int]) -> Dict[str, Any]:
         return self.post("/v3/supply-order/get", {"order_ids": order_ids})
 
+    # ---------- Bundle items from Ozon ----------
+
     def get_bundle_items(self, bundle_ids: List[str], limit: int = 100) -> Dict[str, Any]:
-        return self.post("/v1/supply-order/bundle", {"bundle_ids": bundle_ids, "limit": int(limit)})
+        return self.post("/v1/supply-order/bundle", {"bundle_ids": bundle_ids, "limit": limit})
